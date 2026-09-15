@@ -1,41 +1,41 @@
-# Verified GL-MT5000 data and remaining runtime evidence
+# Router evidence and supported layout
 
-The second-pass findings were supplied by the user from GL-MT5000 / firmware 4.9.0 reconnaissance. No raw dump is checked in.
+## Evidence inspected locally (2026-09-15)
 
-| Purpose | Verified data |
-|---|---|
-| Hardware | ubus call system board: model GL.iNet GL-MT5000, board glinet,gl-mt5000 |
-| GL firmware | /etc/glversion; tested version 4.9.0, independent from rtp2 |
-| Reconciliation | Stock SHA 749518706ad6af15104c90ddba5aa99142e1a9c678fec9074cd4222f8595f82c; patched SHA 5b1a898d8a4943d256f0674c0050519f1ec1353327f7de0778e1c760d3e57704; marker: # vpn-watch GL reconciliation guard v1 |
-| VPN relationships | route_policy section: tunnel_id, group_id, via, peer_id, mark; profile membership in /etc/vpn_profiles.d/profile followed by the tunnel ID |
-| VPN pools | wireguard peer group_id and location: country,city; trim component whitespace and normalize Unicode, no fuzzy matching |
-| LAN | /tmp/dhcp.leases, IPv4 neighbours and router-owned addresses |
-| Static reservations | UCI dhcp host entries, mac and ip; create only missing named sections |
-| Address validity | network.lan.ipaddr/netmask, dhcp.lan.start/limit; unsupported subnet representations fail specifically |
-| Runtime | Existing /tmp/vpn-watch/state, process identity and WireGuard latest-handshakes |
+Read-only inspection used the user's Brume archive: firmware scripts and VPN helper functions; exported UCI network, route-policy, WireGuard and DHCP configuration; generated VPN profile membership; captured firewall rules, routing tables and policy rules; historical watchdog v14.1 and the guard installer. Earlier-version inventory and reconnaissance were also inspected. Raw provider configuration and logs were not imported. The archive was not changed and no live router was contacted.
 
-Location metadata is supported for grouping, not claimed as an immutable global provider ID.
-Peer display names are not retrieved: IDs, group membership and location are sufficient.
-Neighbours are presented as unconfirmed presence, not proof of an online device.
+### Established by these captures
 
-## Kill-switch evidence still needed for firewall-based layouts
+- Selected VPN policies can be anonymous UCI sections (`@rule[index]`). Tunnel and group identifiers are numeric and must be discovered, not installation constants.
+- `/etc/vpn_profiles.d/profile<tunnel>` contains **group_peer** numeric pairs. Discovery filters by selected group, then checks each `wireguard.peer_<peer>.group_id`. The old `peer_<peer>` profile filter was wrong.
+- All 160 peer location entries in the inspected configuration use comma-separated metadata. Exact component trimming and Unicode normalization are a grouping convention, not a provider-issued location ID. The inspected fields expose no dedicated location ID. Every matching peer is retained; generated numeric peer/rank membership controls routing, not display labels.
+- The selected rule has `killswitch=1`. Firmware retains its VPN marking while the interface is down and suppresses the non-VPN failover marking rule when this setting is enabled.
+- The captured fw3 mangle tunnel chain has a selected VPN mark rule followed by a DROP with the same matching scope. It is attached to ROUTE_POLICY. The routing captures also contain marked-table lookups and blackhole defaults in VPN tables. Thus terminal-route checking was useful but insufficient by itself: it did not verify configured intent or policy marking.
+- Firmware maintains `gl_process_vpn` as an internal process rule referring to the active VPN. That reference is not an independent peer group. The installer permits this exact observed generated reference only for the active slot, with the expected section type and no group.
+- The historical watchdog explicitly declares `SLOTS="wgclient1 wgclient2 wgclient3"`. These are intentional ACTIVE/PRECOOKED/RECOVERY resources. Other policy references and peer-group ownership still cause refusal, including references to an otherwise empty slot.
+- Historical `reconcile_roles` selects the next lower rank with profile peers. A standby may be absent while preparation fails or backoff applies. RECOVERY is a free role slot, not a promise of a healthy tunnel. Tier 2 remains sticky; Tier 3 probes better tiers. Multiple peers share one location rank.
+- DHCP exports use host sections with MAC/IP options, including an anonymous host section, plus LAN IPv4 address/netmask and numeric pool start/limit settings. New installer entries use named host sections so no deletion relies on changing anonymous indexes. Leases and neighbours are observations, not proof of online presence.
 
-The supplied correction confirms an enabled kill switch but does not specify its enforcing UCI option/value or firewall rule.
-The verifier accepts a concrete kernel invariant: the selected policy's marked table has a terminal
-unreachable/blackhole/prohibit default, and any unicast default uses the selected VPN interface.
-This is a conservative supported layout, not a claim that the inspected router uses it.
-No guessed kill_switch property or software-version gate is used.
+### Compatibility reconciliation
 
-If that invariant is absent, the remaining evidence is the option/value read by GL firmware and its corresponding
-enforcement rule. Read-only probes to inspect locally:
+Stock rtp2 SHA-256, reproduced across several firmware archives:
 
-- List route-policy option names only: uci -q show route_policy | sed -n 's/^\(route_policy\.[^.]*\.[^=]*\)=.*/\1/p'
-- Read the selected policy's mark: uci -q get route_policy.SELECTED_SECTION.mark
-- ip -4 rule show
-- ip -4 route show table SELECTED_MARK_TABLE
-- Relevant DROP/REJECT or terminal-routing code in /usr/bin/rtp2.sh and its corresponding runtime filter rule.
+`749518706ad6af15104c90ddba5aa99142e1a9c678fec9074cd4222f8595f82c`
 
-Substitute the discovered section/table. Share only the relevant option/value and enforcement rule.
-Do not export full WireGuard/provider configuration or commit proprietary firmware source.
-IKillSwitchVerifier isolates the additional firmware-backed check. There is no bypass or blanket installation gate.
-The installer never silently changes kill-switch state.
+The archived guard installer matches the repository guard installer. Running only its patch-generating awk expression against archived stock bytes **in memory** gives:
+
+`c46469acec44023282fd1d6f729f34ab1b7fd5020ed0c83fc1852a091c2bf075`
+
+This is the catalog's reproducible patched hash. The previous documentation's patched hash (`5b1a898d8a4943d256f0674c0050519f1ec1353327f7de0778e1c760d3e57704`) could not be reproduced or located as a patched firmware file in the inspected archives. It is now unknown, not silently trusted. Resolving that historical discrepancy requires a read-only comparison with the installed router file. A marker-bearing unknown file is refused pending review.
+
+The unique insertion anchor remains `cmd="$1";shift`; the marker remains `# vpn-watch GL reconciliation guard v1`. No proprietary firmware file is stored in this repository. Known patched bytes produce an idempotent patch no-op; an unmarked unknown hash still requires explicit acknowledgement and structural checks.
+
+GL firmware 4.9.0 is the project's recorded tested version and the supplied export context. This offline pass verifies captured file behavior; it does not establish every device running that version has identical files.
+
+## Conservative installer limits
+
+- Runtime verification currently requires the observed fw3 IPv4 chain shape, paired marking/DROP scope, its attachment, an unambiguous selected-mark lookup, VPN-only table routes and a terminal default. IPv6 must be explicitly disabled. nftables, extra tunnel-chain rules, ambiguous policy-routing precedence or other layouts require review rather than guessed acceptance.
+- These are read-only snapshot checks, not a continuous leak detector or proof against an administrator concurrently changing the firewall.
+- All assigned peers must still be present in the selected profile during installation. Therefore next configured rank equals next profile-backed rank at validation; an empty standby is allowed. Ongoing profile edits require rediscovery.
+- LAN selection is restricted to a usable IPv4 subnet. Pool start/limit are read as metadata; the installer does not allocate a new pool or assume a neighbour is online. Static addresses are checked against every observed lease/neighbour/reservation address, including observations hidden by display grouping. All router-owned IPv4 addresses are excluded.
+- Pool allocation behavior, live dnsmasq reloads, UCI private-delta behavior and simultaneous GL panel edits need controlled integration testing. No broader DHCP allocation semantics are inferred from the captured numeric settings.

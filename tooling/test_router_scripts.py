@@ -4,6 +4,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import json
+import hashlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SH = sys.argv[1] if len(sys.argv) > 1 else "sh"
@@ -16,7 +18,7 @@ def run(code, expected=0):
     assert result.returncode == expected, (result.returncode, result.stdout, result.stderr)
     return result.stdout.strip()
 
-for path in ROOT.glob("*.sh"):
+for path in list(ROOT.glob("*.sh")) + list((ROOT / "firmware").glob("*.sh")):
     subprocess.run([SH, "-n", str(path)], check=True)
 
 def function(name):
@@ -36,6 +38,12 @@ with tempfile.TemporaryDirectory(prefix="brume-shell-") as directory:
     assert run(prefix + 'tier1_ranks') == '1\n2'
     assert run(prefix + 'recovery_ranks 3') == ''  # sticky Tier 2
     assert run(prefix + 'recovery_ranks 4') == '1\n2\n3'  # Tier 3 recovers best-to-worst
+    # The captured GL profile format is numeric group_peer, never peer_peerID.
+    profile = directory / 'profile42'
+    profile.write_text('7_11\n7_12\n8_99\nmalformed\n', encoding='utf-8')
+    assert run("sed -n 's/^7_\\([0-9][0-9]*\\)$/peer_\\1/p' '" + profile.as_posix() + "'") == 'peer_11\npeer_12'
+    membership = f"PROFILE_FILE='{profile.as_posix()}'\n" + definitions + '\n' + function('profile_peers_for_rank') + '\n'
+    assert run(membership + f"LOCATION_FILE='{locations.as_posix()}'\nprofile_peers_for_rank 1", expected=1) == '11'
     target = directory / 'rtp2.sh'
     patcher = (ROOT / 'firmware/install-vpn-watch-gl-guard.sh').as_posix()
     target.write_text('#!/bin/sh\ncmd="$1";shift\n', encoding='utf-8')
@@ -61,13 +69,8 @@ with tempfile.TemporaryDirectory(prefix="brume-shell-") as directory:
     assert 'WOULD postpone' in run(guard_prefix + stale_neighbor + guard_checks)
     run(guard_prefix + 'ping() { return 1; }\nip() { return 1; }\n' + guard_checks, 1)
 
-# Verify the critical dataplane implementation stayed byte-for-byte identical.
-original = subprocess.check_output(['git', '-C', str(ROOT), 'show', 'HEAD:vpn-watch.sh'], text=True)
-# The only permitted changes inside promotion are generic notification wording.
-original = original.replace('Croatia gateway in use:', 'Preferred gateway in use:').replace('European gateway in use:', 'Fallback gateway in use:')
-for name in ['promote_iface', 'fastpath_rollback', 'fastpath_verify_consistency']:
-    def extract(text):
-        start = text.index(name + '() {')
-        return text[start:text.index('\n}', start) + 2]
-    assert extract(original) == extract(watch), name + ' changed unexpectedly'
-print('PASS: shell syntax, exact peer mapping, Tier 2 stickiness, Tier 3 recovery order, guard fail-closed checks, zero/multiple/malformed reboot guards, unchanged promotion fastpath')
+# Hashes from the locally inspected historical v14.1 functions. No archive files needed.
+# Promotion baseline normalizes only the two notification wording changes.
+for name, expected in json.loads((ROOT / 'tooling/fastpath-baseline.json').read_text()).items():
+    assert hashlib.sha256(function(name).encode()).hexdigest() == expected, name + ' changed unexpectedly'
+print('PASS: shell syntax, exact peer mapping, Tier 2 stickiness, Tier 3 recovery order, guard fail-closed checks, zero/multiple/malformed reboot guards, historical fastpath hashes')

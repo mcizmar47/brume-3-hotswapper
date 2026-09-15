@@ -12,10 +12,11 @@ public sealed class VpnDiscovery(IRouterTransport router)
         foreach (var line in policies.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             var fields = line.Trim().Split(' ');
-            if (fields.Length != 2 || !Regex.IsMatch(fields[0], "^[A-Za-z0-9_]+$") || !Regex.IsMatch(fields[1], "^[0-9]+$")) continue;
-            var group = (await router.ExecuteAsync($"uci -q get route_policy.{fields[0]}.group_id", ct)).Trim();
+            if (fields.Length != 2 || !RouterInspection.IsPolicyIdentifier(fields[0]) || !Regex.IsMatch(fields[1], "^[0-9]+$")) continue;
+            var policy = RouterInspection.Identifier(fields[0]);
+            var group = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.group_id", ct)).Trim();
             if (!Regex.IsMatch(group, "^[0-9]+$")) continue;
-            var peers = await router.ExecuteAsync($"if [ -f /etc/vpn_profiles.d/profile{fields[1]} ]; then sed -n '/^peer_[0-9][0-9]*$/p' /etc/vpn_profiles.d/profile{fields[1]}; fi", ct);
+            var peers = await router.ExecuteAsync($"if [ -f /etc/vpn_profiles.d/profile{fields[1]} ]; then sed -n 's/^{group}_\\([0-9][0-9]*\\)$/peer_\\1/p' /etc/vpn_profiles.d/profile{fields[1]}; fi", ct);
             var connections = new List<VpnConnection>();
             foreach (var peer in peers.Split('\n').Select(s => s.Trim()).Where(s => Regex.IsMatch(s, "^peer_[0-9]+$")).Distinct())
             {

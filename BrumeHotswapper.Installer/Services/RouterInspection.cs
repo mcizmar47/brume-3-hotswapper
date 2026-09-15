@@ -11,14 +11,32 @@ public interface IRouterTransport
 public interface IKillSwitchVerifier { Task VerifyAsync(IRouterTransport router, string policy, CancellationToken ct); }
 public sealed class KillSwitchVerifier : IKillSwitchVerifier
 {
-    // The supplied reconnaissance does not name a kill-switch UCI option.
-    // A terminal route is a kernel-enforced no-fallback invariant for this mark.
-    // Other firewall layouts need explicit evidence, never a guessed UCI field.
+    // Archive: killswitch=1 preserves marking on interface-down and suppresses WAN failover.
+    // Require both intent and the captured fw3 enforcement shape; terminal routes remain a secondary check.
     public async Task VerifyAsync(IRouterTransport router, string policy, CancellationToken ct)
     {
+        policy = RouterInspection.Identifier(policy);
+        if ((await router.ExecuteAsync($"uci -q get route_policy.{policy}.killswitch || true", ct)).Trim() != "1")
+            throw new SafeFailure("Enable the selected VPN policy's kill switch in the GL panel before installing. The installer does not change this setting.");
+        if ((await router.ExecuteAsync($"uci -q get route_policy.{policy}.enabled || true", ct)).Trim() != "1")
+            throw new SafeFailure("The selected VPN policy is disabled.");
+        if ((await router.ExecuteAsync("uci -q get glipv6.globals.enabled || true", ct)).Trim() != "0")
+            throw new SafeFailure("IPv6 enforcement needs separate verification. This installer currently verifies the captured IPv4 firewall layout only.");
+        var tunnel = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.tunnel_id", ct)).Trim();
+        if (!Regex.IsMatch(tunnel, "^[0-9]+$")) throw new SafeFailure("The selected policy has no valid tunnel identifier.");
         var mark = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.mark", ct)).Trim();
-        if (!Regex.IsMatch(mark, "^0x[0-9a-fA-F]+$")) throw new SafeFailure("The selected VPN policy has no interpretable routing mark. Enable its connection in the GL panel and retry.");
+        if (!Regex.IsMatch(mark, "^0x[0-9a-fA-F]{1,8}$")) throw new SafeFailure("The selected VPN policy has no interpretable routing mark. Enable its connection in the GL panel and retry.");
+        uint selectedMark = Convert.ToUInt32(mark[2..], 16);
+        if ((selectedMark & 0xf000) == 0 || (selectedMark & ~0xf000u) != 0)
+            throw new SafeFailure("The selected VPN policy uses an unsupported routing mark.");
         var active = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim();
+        if (!new[] { "wgclient1", "wgclient2", "wgclient3" }.Contains(active))
+            throw new SafeFailure("The selected VPN policy is not on a Hotswapper runtime slot.");
+        var chain = "TUNNEL" + tunnel + "_ROUTE_POLICY";
+        var firewall = await router.ExecuteAsync($"iptables -w -t mangle -S {chain}", ct);
+        if (!HasPolicyRules(firewall, chain, mark))
+            throw new SafeFailure("The kill switch is configured, but the selected policy's VPN marking and DROP rules could not be verified.");
+        await router.ExecuteAsync($"iptables -w -t mangle -C ROUTE_POLICY -m addrtype ! --dst-type LOCAL -j {chain}", ct);
         var rules = await router.ExecuteAsync("ip -4 rule show", ct);
         foreach (var rule in rules.Split('\n').Where(l => l.Contains($"fwmark {mark}/0xf000 ")))
         {
@@ -27,9 +45,9 @@ public sealed class KillSwitchVerifier : IKillSwitchVerifier
             int priority = int.Parse(table.Groups[1].Value);
             bool ambiguousEarlier = rules.Split('\n').Where(l => l.Contains(':')).Any(l =>
             {
-                if (!int.TryParse(l.Split(':')[0].Trim(), out var earlier) || earlier >= priority || l.TrimEnd().EndsWith("lookup local")) return false;
+                if (!int.TryParse(l.Split(':')[0].Trim(), out var earlier) || earlier > priority || l == rule || l.TrimEnd().EndsWith("lookup local")) return false;
                 var otherMark = Regex.Match(l, @"fwmark (0x[0-9a-fA-F]+)/(0x[0-9a-fA-F]+)");
-                if (otherMark.Success)
+                if (otherMark.Success && !Regex.IsMatch(l, @"\bnot\b"))
                 {
                     uint actual = Convert.ToUInt32(mark[2..], 16), value = Convert.ToUInt32(otherMark.Groups[1].Value[2..], 16), mask = Convert.ToUInt32(otherMark.Groups[2].Value[2..], 16);
                     if ((actual & mask) != (value & mask)) return false;
@@ -39,24 +57,45 @@ public sealed class KillSwitchVerifier : IKillSwitchVerifier
             if (ambiguousEarlier) continue;
             var routes = await router.ExecuteAsync($"ip -4 route show table {table.Groups[2].Value}", ct);
             var defaults = routes.Split('\n').Where(l => l.StartsWith("default ")).ToArray();
+            if (routes.Split('\n', StringSplitOptions.RemoveEmptyEntries).Any(l =>
+                !Regex.IsMatch(l.Trim(), @"^(unreachable|blackhole|prohibit) ") &&
+                !Regex.IsMatch(l, $@"\bdev {Regex.Escape(active)}(?: |$)"))) continue;
             if (defaults.Any(l => !Regex.IsMatch(l, $@"\bdev {Regex.Escape(active)}(?: |$)"))) continue;
             if (routes.Split('\n').Any(l => Regex.IsMatch(l.Trim(), @"^(unreachable|blackhole|prohibit) default(?: |$)"))) return;
         }
-        throw new SafeFailure("The selected policy's kill-switch enforcement could not be verified: no matching terminal VPN route was found. Keep the GL kill switch enabled and provide its verified policy option/value or firewall enforcement rules. Read-only probes are listed in docs/router-data.md.");
+        throw new SafeFailure("The selected policy's kill-switch enforcement could not be verified: the selected mark has no unambiguous terminal VPN route. Keep the GL kill switch enabled; this runtime layout needs review.");
     }
+    public static bool HasPolicyRules(string output, string chain, string mark)
+    {
+        var rules = output.Split('\n').Select(l => Regex.Replace(l.Trim(), " -m comment --comment \"[^\"]*\"", ""))
+            .Where(l => l.StartsWith("-A " + chain + " ")).ToArray();
+        // A paired scope is essential: a DROP for another destination set proves nothing.
+        if (rules.Length != 2) return false;
+        string prefix = "-A " + chain + " ", suffix = " -j MARK --set-xmark " + mark + "/0xf000";
+        if (!rules[0].EndsWith(suffix)) return false;
+        var scope = rules[0][prefix.Length..^suffix.Length];
+        return scope.StartsWith("-m mark --mark 0x0/0xf000") &&
+            !scope.Contains(" -j ") && !scope.Contains(" -g ") && rules[1] == prefix + scope + " -j DROP";
+    }
+
 }
 public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifier killSwitch)
 {
+    public static bool IsPolicyIdentifier(string id) => Regex.IsMatch(id, @"^([A-Za-z0-9_]+|@rule\[[0-9]+\])$");
     public static string Identifier(string id)
-    { if (!Regex.IsMatch(id, "^[A-Za-z0-9_]+$")) throw new SafeFailure("An unsupported router identifier was returned."); return id; }
+    {
+        if (!IsPolicyIdentifier(id)) throw new SafeFailure("An unsupported router identifier was returned.");
+        return id.StartsWith('@') ? ConfigurationGenerator.Quote(id) : id;
+    }
     public async Task<LanInventory> LanAsync(CancellationToken ct)
     {
         string address = (await router.ExecuteAsync("uci -q get network.lan.ipaddr", ct)).Trim();
         string mask = (await router.ExecuteAsync("uci -q get network.lan.netmask", ct)).Trim();
         string start = (await router.ExecuteAsync("uci -q get dhcp.lan.start", ct)).Trim();
         string limit = (await router.ExecuteAsync("uci -q get dhcp.lan.limit", ct)).Trim();
-        if (!System.Net.IPAddress.TryParse(address, out _) || !System.Net.IPAddress.TryParse(mask, out _) ||
-            !int.TryParse(start, out int poolStart) || !int.TryParse(limit, out int poolLimit))
+        if (!System.Net.IPAddress.TryParse(address, out var lanAddress) || lanAddress.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork ||
+            !System.Net.IPAddress.TryParse(mask, out var lanMask) || lanMask.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork ||
+            !int.TryParse(start, out int poolStart) || !int.TryParse(limit, out int poolLimit) || poolStart < 0 || poolLimit < 0)
             throw new SafeFailure("The LAN IPv4 subnet and DHCP pool could not be read. Multi-subnet or nonstandard LAN layouts require review.");
         var network = new LanNetwork(address, mask, poolStart, poolLimit);
         var reservations = new List<Reservation>();
@@ -72,6 +111,7 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
                 catch (SafeFailure) { throw new SafeFailure("A DHCP host entry uses an unsupported MAC/address format. Resolve it before configuring maintenance guards."); }
             }
         }
+        var observations = reservations.Select(r => new LanClient("Reservation", r.Ip, r.Mac, true)).ToList();
         var clients = new Dictionary<string, LanClient>(StringComparer.OrdinalIgnoreCase);
         foreach (var r in reservations.Where(r => network.ContainsHost(r.Ip))) clients[r.Mac] = new("Reserved device", r.Ip, r.Mac, true);
         var leases = await router.ExecuteAsync("if [ -r /tmp/dhcp.leases ]; then cat /tmp/dhcp.leases; fi", ct);
@@ -81,6 +121,7 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
             if (f.Length < 4 || !network.ContainsHost(f[2])) continue;
             try {
                 ConfigurationGenerator.ValidateDevice(f[1], f[2]);
+                observations.Add(new("Lease (presence unconfirmed)", f[2], f[1]));
                 var reserved = reservations.FirstOrDefault(r => r.Mac.Equals(f[1], StringComparison.OrdinalIgnoreCase));
                 clients[f[1]] = new(f[3] == "*" ? "Unnamed device" : f[3], reserved?.Ip ?? f[2], f[1], reserved != null);
             } catch (SafeFailure) { }
@@ -89,12 +130,12 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         foreach (var line in neighbors.Split('\n'))
         {
             var f = line.Split(' ', StringSplitOptions.RemoveEmptyEntries); int at = Array.IndexOf(f, "lladdr");
-            if (at < 0 || at + 1 >= f.Length || !network.ContainsHost(f[0]) || clients.ContainsKey(f[at + 1])) continue;
-            try { ConfigurationGenerator.ValidateDevice(f[at + 1], f[0]); clients[f[at + 1]] = new("Neighbour (presence unconfirmed)", f[0], f[at + 1]); } catch (SafeFailure) { }
+            if (at < 0 || at + 1 >= f.Length || !network.ContainsHost(f[0])) continue;
+            try { ConfigurationGenerator.ValidateDevice(f[at + 1], f[0]); var observed = new LanClient("Neighbour (presence unconfirmed)", f[0], f[at + 1]); observations.Add(observed); clients.TryAdd(f[at + 1], observed); } catch (SafeFailure) { }
         }
         var local = await router.ExecuteAsync("ip -o -4 addr show | awk '{print $4}'", ct);
         var owned = local.Split('\n').Select(l => l.Split('/')[0]).ToHashSet();
-        return new(network, clients.Values.Where(c => !owned.Contains(c.Ip)).OrderBy(c => c.Hostname).ToArray(), reservations);
+        return new(network, clients.Values.Where(c => !owned.Contains(c.Ip)).OrderBy(c => c.Hostname).ToArray(), reservations, observations, owned.ToArray());
     }
     public async Task<RouterSnapshot> InspectAsync(InstallerConfiguration c, CancellationToken ct, bool enforceKillSwitch = true)
     {
@@ -115,6 +156,15 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
             throw new SafeFailure("The selected VPN must be active on a supported WireGuard instance before installation.");
         foreach (var slot in new[] {"wgclient1", "wgclient2", "wgclient3"})
         {
+            var other = (await router.ExecuteAsync($"uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.via='{slot}'$/\\1/p\"", ct)).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var reference in other.Where(s => s != c.Profile.PolicySection))
+            {
+                // Firmware handle_always_vpn_policy maintains this process rule for the active VPN.
+                bool generated = reference == "gl_process_vpn" && slot == active &&
+                    (await router.ExecuteAsync("uci -q get route_policy.gl_process_vpn", ct)).Trim() == "rule_process" &&
+                    (await router.ExecuteAsync("uci -q get route_policy.gl_process_vpn.group_id || true", ct)).Trim().Length == 0;
+                if (!generated) throw new SafeFailure($"WireGuard instance {slot} is referenced by another VPN policy.");
+            }
             var config = (await router.ExecuteAsync($"uci -q get network.{slot}.config || true", ct)).Trim();
             if (config.Length == 0)
             {
@@ -125,8 +175,7 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
             if (!Regex.IsMatch(config, "^peer_[0-9]+$")) throw new SafeFailure($"WireGuard instance {slot} belongs to an unsupported VPN configuration.");
             var owner = (await router.ExecuteAsync($"uci -q get wireguard.{config}.group_id", ct)).Trim();
             if (owner != group) throw new SafeFailure($"WireGuard instance {slot} is occupied by another VPN list. Disconnect it before installing.");
-            var other = (await router.ExecuteAsync($"uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.via='{slot}'$/\\1/p\"", ct)).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            if (other.Any(s => s != policy)) throw new SafeFailure($"WireGuard instance {slot} is referenced by another VPN policy.");
+
         }
         var members = ConfigurationGenerator.Locations(c).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Split('\t')[5]).ToHashSet();
         if (!members.Contains(activePeer)) throw new SafeFailure("The currently active VPN location must be assigned to a tier before installation.");
@@ -136,9 +185,9 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
             var location = (await router.ExecuteAsync($"uci -q get wireguard.peer_{peer.PeerId}.location", ct)).Trim();
             if (owner != group || ExactLocationResolver.Normalize(location) != ExactLocationResolver.Normalize(peer.Location))
                 throw new SafeFailure("VPN pool membership changed. Discover VPN lists again.");
-            await router.ExecuteAsync($"grep -Fxq 'peer_{peer.PeerId}' /etc/vpn_profiles.d/profile{tunnel}", ct);
+            await router.ExecuteAsync($"grep -Fxq '{c.Profile.GroupId}_{peer.PeerId}' /etc/vpn_profiles.d/profile{tunnel}", ct);
         }
-        if (enforceKillSwitch) await killSwitch.VerifyAsync(router, policy, ct);
+        if (enforceKillSwitch) await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
         var marker = (await router.ExecuteAsync("grep -Fc '# vpn-watch GL reconciliation guard v1' /usr/bin/rtp2.sh || true", ct)).Trim();
         if (CompatibilityCatalog.Classify(hash) == Compatibility.AlreadyPatchedKnownCompatible)
         { if (marker != "1") throw new SafeFailure("The existing GL reconciliation guard marker is missing or duplicated."); }
@@ -150,7 +199,7 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         var files = new List<FileState>();
         foreach (var path in DeploymentPlanning.Paths)
         {
-            var result = (await router.ExecuteAsync($"test ! -L '{path}' && if [ -e '{path}' ]; then test -f '{path}' || exit 1; test \"$(stat -c %u '{path}')\" = 0 || exit 1; sha256sum '{path}' | awk '{{print $1}}'; stat -c %a '{path}'; else echo absent; fi", ct)).Trim().Split('\n');
+            var result = (await router.ExecuteAsync($"test ! -L '{path}' && if [ -e '{path}' ]; then test -f '{path}' || exit 1; test \"$(stat -c %u:%g '{path}')\" = 0:0 || exit 1; sha256sum '{path}' | awk '{{print $1}}'; stat -c %a '{path}'; else echo absent; fi", ct)).Trim().Split('\n');
             if (result[0] != "absent" && (!Regex.IsMatch(result[0], "^[a-f0-9]{64}$") || result.Length != 2 || !Regex.IsMatch(result[1], "^[0-7]{3,4}$")))
                 throw new SafeFailure("An installation target has unexpected file ownership, type or metadata.");
             files.Add(result[0] == "absent" ? new(path, "", "", false) : new(path, result[0], result.ElementAtOrDefault(1) ?? "", true));
@@ -159,7 +208,7 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         _ = CronPlanner.Generate(cron, c.Maintenance);
         var pids = await DaemonPidsAsync(ct);
         if (pids.Length > 1) throw new SafeFailure("Multiple Hotswapper daemons are running. Stop the duplicates before installation.");
-        return new(live, policy, active, activePeer, cron, (c.Guards.Count > 0 ? await LanAsync(ct) : new LanInventory(new("0.0.0.0", "0.0.0.0", 0, 0), [], [])), files, pids.Length == 1);
+        return new(live, c.Profile.PolicySection, active, activePeer, cron, (c.Guards.Count > 0 ? await LanAsync(ct) : new LanInventory(new("0.0.0.0", "0.0.0.0", 0, 0), [], [])), files, pids.Length == 1);
     }
     public async Task<string[]> DaemonPidsAsync(CancellationToken ct)
     {

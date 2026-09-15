@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 namespace BrumeHotswapper.Tests;
 public class SecondPassTests
 {
-    private static InstallerConfiguration Config(string hash = CompatibilityCatalog.StockHash)
+    internal static InstallerConfiguration Config(string hash = CompatibilityCatalog.StockHash)
     {
         var peers = new[] {new VpnConnection("11","VPN connection","Germany,Frankfurt")};
         var tiers = new[] { new TierColumn("Unassigned",0), new TierColumn("Tier 1",1), new TierColumn("Tier 2",2), new TierColumn("Tier 3",3) };
@@ -115,13 +115,13 @@ public class SecondPassTests
         Assert.DoesNotContain(c.NtfyUrl,plan.ToString()); Assert.DoesNotContain(c.NtfyUrl,c.ToString());
         Assert.All(plan.Changes,s=>Assert.DoesNotContain(c.NtfyUrl,s));
     }
-    private sealed class VerifiedKillSwitch : IKillSwitchVerifier
+    internal sealed class VerifiedKillSwitch : IKillSwitchVerifier
     { public Task VerifyAsync(IRouterTransport r,string policy,CancellationToken ct)=>Task.CompletedTask; }
     private sealed class FailedKillSwitch : IKillSwitchVerifier
     { public Task VerifyAsync(IRouterTransport r,string policy,CancellationToken ct)=>throw new SafeFailure("Kill switch is not verified."); }
 
     // In-memory command boundary fixture: never invokes SSH, SFTP or a shell.
-    private sealed class RouterFixture : IRouterTransport
+    internal sealed class RouterFixture : IRouterTransport
     {
         public Dictionary<string,string> Uploads {get;}=[];
         public Dictionary<string,string> Installed {get;}=[];
@@ -154,7 +154,7 @@ public class SecondPassTests
             else if(cmd.StartsWith("for f in /proc/")) result=Running?"123":"";
             else if(cmd=="stat -c %a '/usr/bin/rtp2.sh'") result="755";
             else if(cmd.StartsWith("crontab -l")) result=Cron;
-            else if(cmd.StartsWith("crontab /root/")) Cron=Uploads["/root/.hotswap-installer/transaction/cron"];
+            else if(cmd.Contains("&& crontab /root/")) Cron=Uploads["/root/.hotswap-installer/transaction/cron"];
             else if(cmd.Contains("cp -p '/root/.hotswap-installer/transaction/"))
             {
                 var match=Regex.Match(cmd,@"cp -p '([^']+)' '([^']+)\.hotswap-new'");
@@ -173,6 +173,12 @@ public class SecondPassTests
             }
             else if(cmd.StartsWith("rm -f '"))
                 Installed.Remove(Regex.Match(cmd,@"rm -f '([^']+)'").Groups[1].Value);
+            else if (!new[] { "test ", "set -e; test ", "sh -n ", "sh /root/.hotswap-installer/transaction/", "cp /usr/bin/rtp2.sh ",
+                "if [ -e /root/.hotswap-installer/transaction", "if ip link show wgclient", "grep -Fxq ",
+                "uci -q get network.wgclient2.config", "uci -q get network.wgclient3.config", "uci -q show dhcp",
+                "if [ -r /tmp/dhcp.leases", "ip -4 neigh show", "ip -o -4 addr show", "if uci -q get dhcp.",
+                "/etc/init.d/dnsmasq reload", "wg show ", "rm -rf /root/.hotswap-installer/transaction" }.Any(cmd.StartsWith))
+                throw new InvalidOperationException("Unexpected fixture command: " + cmd);
             return Task.FromResult(result);
         }
     }

@@ -9,7 +9,7 @@ public static class CompatibilityCatalog
 {
     public const string StockHash = "749518706ad6af15104c90ddba5aa99142e1a9c678fec9074cd4222f8595f82c";
     public static readonly HashSet<string> TestedFirmware = ["4.9.0"];
-    public const string PatchedHash = "5b1a898d8a4943d256f0674c0050519f1ec1353327f7de0778e1c760d3e57704";
+    public const string PatchedHash = "c46469acec44023282fd1d6f729f34ab1b7fd5020ed0c83fc1852a091c2bf075";
     public static readonly HashSet<string> IncompatibleHashes = new(StringComparer.OrdinalIgnoreCase);
     public static Compatibility Classify(string hash) => IncompatibleHashes.Contains(hash) ? Compatibility.KnownIncompatible
         : hash.Equals(StockHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.StockKnownCompatible

@@ -37,13 +37,28 @@ public class DiscoveryTests
         if(accepted) await new KillSwitchVerifier().VerifyAsync(router,"vpn",CancellationToken.None);
         else await Assert.ThrowsAsync<SafeFailure>(()=>new KillSwitchVerifier().VerifyAsync(router,"vpn",CancellationToken.None));
     }
-    private class RouteRouter(string routes) : IRouterTransport
+    [Theory]
+    [InlineData("100: from all fwmark 0x1000/0xf000 lookup 2000")]
+    [InlineData("50: not from all fwmark 0x2000/0xf000 lookup 2000")]
+    public async Task AmbiguousOrNegatedEarlierRulesAreRefused(string earlier)
+    {
+        var router = new RouteRouter("default dev wgclient1\nblackhole default metric 254",
+            earlier + "\n100: from all fwmark 0x1000/0xf000 lookup 1001\n");
+        await Assert.ThrowsAsync<SafeFailure>(() => new KillSwitchVerifier().VerifyAsync(router, "vpn", default));
+    }
+    private class RouteRouter(string routes, string? customRules = null) : IRouterTransport
     {
         public Task UploadAsync(string p,string c,CancellationToken ct)=>throw new Exception("No writes expected");
         public Task<string> ExecuteAsync(string cmd,CancellationToken ct)=>Task.FromResult(cmd switch {
+            "uci -q get route_policy.vpn.killswitch || true"=>"1",
+            "uci -q get route_policy.vpn.enabled || true"=>"1",
+            "uci -q get glipv6.globals.enabled || true"=>"0",
+            "uci -q get route_policy.vpn.tunnel_id"=>"42",
+            "iptables -w -t mangle -S TUNNEL42_ROUTE_POLICY"=>"-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j MARK --set-xmark 0x1000/0xf000\n-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j DROP",
+            var c when c.StartsWith("iptables -w -t mangle -C ROUTE_POLICY")=>"",
             "uci -q get route_policy.vpn.mark"=>"0x1000",
             "uci -q get route_policy.vpn.via"=>"wgclient1",
-            "ip -4 rule show"=>"0: from all lookup local\n100: from all fwmark 0x1000/0xf000 lookup 1001\n32766: from all lookup main\n",
+            "ip -4 rule show"=>customRules ?? "0: from all lookup local\n100: from all fwmark 0x1000/0xf000 lookup 1001\n32766: from all lookup main\n",
             "ip -4 route show table 1001"=>routes,
             _=>throw new Exception("Unexpected read")
         });

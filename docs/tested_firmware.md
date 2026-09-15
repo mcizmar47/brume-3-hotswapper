@@ -1,34 +1,11 @@
-# Tested Firmware
+# Firmware compatibility evidence
 
-## GL.iNet Brume 3
+The project records GL-MT5000 / GL firmware 4.9.0 as its tested target. The reconciliation pass checked archived stock bytes and reproduced the guard output locally; it did not run a live firmware test.
 
-- Device: GL.iNet Brume 3
-- Model: GL-MT5000
-- GL.iNet Admin Panel: v4.9.0
-- OpenWrt base: 21.02-SNAPSHOT
-- Platform: mediatek/mt7987
-- Architecture: aarch64_cortex-a53
+- Stock rtp2 SHA-256: `749518706ad6af15104c90ddba5aa99142e1a9c678fec9074cd4222f8595f82c`
+- Reproducible guarded SHA-256: `c46469acec44023282fd1d6f729f34ab1b7fd5020ed0c83fc1852a091c2bf075`
+- Guard marker: `# vpn-watch GL reconciliation guard v1`
 
-## Firmware Integration
+The previously reported patched SHA was not reproduced from the archived stock and identical archived patcher. It is no longer classified as known. See [router evidence](router-data.md) for the discrepancy, evidence provenance and fail-closed behavior.
 
-The hotswapper integrates with GL.iNet's VPN implementation and applies a small runtime guard patch that prevents a possible race condition to:
-
-`/usr/bin/rtp2.sh`
-
-Original `rtp2.sh` SHA-256 on the tested firmware:
-
-`749518706ad6af15104c90ddba5aa99142e1a9c678fec9074cd4222f8595f82c`
-
-Patched `rtp2.sh` SHA-256:
-
-`5b1a898d8a4943d256f0674c0050519f1ec1353327f7de0778e1c760d3e57704`
-
-## Tested Configuration
-
-- VPN provider: NordVPN
-- VPN protocol: WireGuard / NordLynx
-- GL.iNet VPN tunnel ID: 5779
-- GL.iNet VPN group ID: 10004
-- Kill switch: enabled
-- Maximum simultaneous WireGuard instances used by the hotswapper: 3
-- Roles: active, precooked standby, recovery
+Tunnel/group identifiers are discovered. The three runtime slots and ACTIVE/PRECOOKED/RECOVERY design are intentional. See [installer](installer.md) for verification limits and the proposed live test sequence.
