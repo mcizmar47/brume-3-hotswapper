@@ -60,13 +60,14 @@ public sealed class WizardViewModel : Observable, IDisposable
     public string DeviceSummary => Router is null ? "No router connected." : $"{Router.Model}\nAddress: {Router.Address}\n\n" + (Router.IsBrume ? "GL-MT5000 verified. You may continue." : "Unsupported device. Installation is blocked; connect to a Brume 3 / GL-MT5000.");
     public string CompatibilityDetails => Router == null ? "" : $"Board: {Router.Board}\nAddress: {Router.Address}\nrtp2 SHA-256: {Router.Rtp2Hash}";
     public string CompatibilitySummary => Router is null ? "" : $"Firmware: {Router.Firmware}\n"
-        + (CompatibilityCatalog.TestedFirmware.Contains(Router.Firmware) ? "Tested firmware version." : "This firmware version has not been tested. You may continue.")
+        + (CompatibilityCatalog.TestedFirmware.Contains(Router.Firmware) ? "Tested firmware version." : "This firmware version has not been tested. Installation is blocked.")
         + "\n\n" + (CompatibilityCatalog.Classify(Router.Rtp2Hash) switch
         {
             Compatibility.StockKnownCompatible => "Known compatible GL VPN implementation.",
+            Compatibility.HistoricalGuardKnownCompatible => "Verified historical GL reconciliation guard detected.",
             Compatibility.AlreadyPatchedKnownCompatible => "Existing GL reconciliation guard detected.",
             Compatibility.KnownIncompatible => "This GL VPN implementation is known to be incompatible. Installation cannot continue.",
-            _ => "The GL VPN reconciliation implementation differs from the tested version. Acknowledge this risk to let the guarded patcher check whether it can be installed safely."
+            _ => "The GL VPN reconciliation implementation is unknown. Installation is blocked until its compatibility is established."
         });
     public VpnProfile? SelectedProfile { get => selectedProfile; set { if (Set(ref selectedProfile, value)) { foreach (var t in Tiers) t.Locations.Clear(); if (value != null) foreach (var g in new ExactLocationResolver().Group(value.Connections)) Tiers[0].Locations.Add(g); LocationAccepted = false; Refresh(); } } }
     public ObservableCollection<VpnProfile> Profiles { get; } = [];
@@ -104,7 +105,7 @@ public sealed class WizardViewModel : Observable, IDisposable
     {
         0 => Acknowledged, 1 => false, 2 => Router?.IsBrume == true,
         3 => Router != null && CompatibilityCatalog.Classify(Router.Rtp2Hash) != Compatibility.KnownIncompatible
-            && (CompatibilityCatalog.Classify(Router.Rtp2Hash) != Compatibility.Unknown || UnknownAccepted),
+            && CompatibilityCatalog.Classify(Router.Rtp2Hash) != Compatibility.Unknown && CompatibilityCatalog.TestedFirmware.Contains(Router.Firmware),
         4 => SelectedProfile != null,
         9 => false, 10 => installed, 11 => false, _ => true
     };

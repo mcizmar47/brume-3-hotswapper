@@ -59,6 +59,19 @@ def main():
     catalog = (ROOT / 'BrumeHotswapper.Installer/Core/Planning.cs').read_text(encoding='utf-8')
     expected = re.search(r'const string PatchedHash = "([a-f0-9]{64})"', catalog)[1]
     assert sha(patched) == expected
+    # The archived generator's printf format can retain a backslash-n instead of a
+    # literal newline. Only touch that guard-owned format, never proprietary code.
+    historical_patched = patched.replace(b"args=%s\n", b"args=%s\\n", 1)
+    historical_line = next(l for l in historical_patched.splitlines() if b"printf '" in l and b"args=%s" in l)
+    assert len(historical_line) == 100
+    assert sha(historical_line) == '7ec93c0e599a82a581aa3ab906eb221794bb14e4972488c1dfa193a7410e041a'
+    assert len(historical_patched) == 81001 and sha(historical_patched) == REPORTED
+    # Compare shell printf semantics using only the format strings, no router execution.
+    for fmt in [b"%s pid=%s cmd=%s args=%s\n", b"%s pid=%s cmd=%s args=%s\\n"]:
+        output = subprocess.run([str(args.shell)], input=b"printf '" + fmt + b"' 1 2 3 4", capture_output=True, env=env)
+        assert output.returncode == 0 and output.stdout == b'1 pid=2 cmd=3 args=4\n'
+    print('PASS: historical 5b1a full hash, 81001 bytes, exact 100-byte line hash, equivalent printf newline semantics')
+
     before, after = stock.splitlines(keepends=True), patched.splitlines(keepends=True)
     changes = [op for op in difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes() if op[0] != 'equal']
     assert len(changes) == 1 and changes[0][0] == 'insert'

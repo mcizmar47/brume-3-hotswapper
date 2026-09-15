@@ -49,7 +49,7 @@
       <TextBlock Text="Firmware version and VPN reconciliation compatibility are checked independently."/>
       <TextBlock Text="{Binding CompatibilitySummary}" FontSize="15"/>
       <Expander Header="Technical details" Margin="0,10"><TextBlock Text="{Binding CompatibilityDetails}" FontFamily="Consolas" FontSize="12"/></Expander>
-      <CheckBox IsChecked="{Binding UnknownAccepted}"><TextBlock Text="If the reconciliation hash is unknown, I acknowledge the risk and allow the structural patcher to attempt its guarded checks." Margin="4,0"/></CheckBox>
+      <TextBlock Text="Installation requires a verified compatible reconciliation hash." Margin="4,0"/>
      </StackPanel>
     </ScrollViewer>
     <StackPanel Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=4}">

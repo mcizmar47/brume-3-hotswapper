@@ -46,24 +46,12 @@ public sealed class KillSwitchVerifier : IKillSwitchVerifier
             if (!table.Success || int.Parse(table.Groups[1].Value) >= 32766) continue;
             recognizedLookups++;
             int priority = int.Parse(table.Groups[1].Value);
-            bool ambiguousEarlier = rules.Split('\n').Where(l => l.Contains(':')).Any(l =>
-            {
-                if (!int.TryParse(l.Split(':')[0].Trim(), out var earlier) || earlier > priority || l == rule || l.TrimEnd().EndsWith("lookup local")) return false;
-                var otherMark = Regex.Match(l, @"fwmark (0x[0-9a-fA-F]+)/(0x[0-9a-fA-F]+)");
-                if (otherMark.Success && !Regex.IsMatch(l, @"\bnot\b"))
-                {
-                    uint actual = Convert.ToUInt32(mark[2..], 16), value = Convert.ToUInt32(otherMark.Groups[1].Value[2..], 16), mask = Convert.ToUInt32(otherMark.Groups[2].Value[2..], 16);
-                    if ((actual & mask) != (value & mask)) return false;
-                }
-                return true;
-            });
+            bool ambiguousEarlier = !await RoutingProtection.EarlierRulesSafeAsync(router, rules, rule, priority, selectedMark, active, ct);
             if (ambiguousEarlier) { ambiguousLookups++; continue; }
             var routes = await router.ExecuteAsync($"ip -4 route show table {table.Groups[2].Value}", ct);
             var defaults = routes.Split('\n').Where(l => l.StartsWith("default ")).ToArray();
-            if (routes.Split('\n', StringSplitOptions.RemoveEmptyEntries).Any(l =>
-                !Regex.IsMatch(l.Trim(), @"^(unreachable|blackhole|prohibit) ") &&
-                !Regex.IsMatch(l, $@"\bdev {Regex.Escape(active)}(?: |$)"))) { unsafeTables++; continue; }
-            if (defaults.Any(l => !Regex.IsMatch(l, $@"\bdev {Regex.Escape(active)}(?: |$)"))) { unsafeTables++; continue; }
+            if (!RoutingProtection.SafeRoutes(routes, active) || defaults.Length != 1 ||
+                !Regex.IsMatch(defaults[0], $@"\bdev {Regex.Escape(active)}(?: |$)")) { unsafeTables++; continue; }
             if (routes.Split('\n').Any(l => Regex.IsMatch(l.Trim(), @"^(unreachable|blackhole|prohibit) default(?: |$)"))) return;
             missingTerminal++;
         }
@@ -149,6 +137,8 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         var live = c.Router with { Model = board.RootElement.GetProperty("model").GetString() ?? "", Board = board.RootElement.GetProperty("board_name").GetString() ?? "" };
         if (!live.IsBrume) throw new SafeFailure("The connected device is not a GL-MT5000.");
         var hash = (await router.ExecuteAsync("sha256sum /usr/bin/rtp2.sh | awk '{print $1}'", ct)).Trim();
+        if (CompatibilityCatalog.Classify(hash) is Compatibility.Unknown or Compatibility.KnownIncompatible || !CompatibilityCatalog.TestedFirmware.Contains(c.Router.Firmware))
+            throw new SafeFailure("Firmware compatibility must pass before installation planning.");
         if (hash != c.Router.Rtp2Hash) throw new SafeFailure("Firmware changed since compatibility review. Reconnect and review it again.");
         var policy = Identifier(c.Profile.PolicySection);
         string group = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.group_id", ct)).Trim();
@@ -194,7 +184,7 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         }
         if (enforceKillSwitch) await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
         var marker = (await router.ExecuteAsync("grep -Fc '# vpn-watch GL reconciliation guard v1' /usr/bin/rtp2.sh || true", ct)).Trim();
-        if (CompatibilityCatalog.Classify(hash) == Compatibility.AlreadyPatchedKnownCompatible)
+        if (CompatibilityCatalog.IsPatched(hash))
         { if (marker != "1") throw new SafeFailure("The existing GL reconciliation guard marker is missing or duplicated."); }
         else if (marker != "0") throw new SafeFailure("An unrecognized existing reconciliation guard needs review before updating.");
         else await router.ExecuteAsync("test \"$(grep -Fxc 'cmd=\"$1\";shift' /usr/bin/rtp2.sh)\" = 1 && sh -n /usr/bin/rtp2.sh", ct);
@@ -204,10 +194,7 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         var files = new List<FileState>();
         foreach (var path in DeploymentPlanning.Paths)
         {
-            var result = (await router.ExecuteAsync($"test ! -L '{path}' && if [ -e '{path}' ]; then test -f '{path}' || exit 1; test \"$(stat -c %u:%g '{path}')\" = 0:0 || exit 1; sha256sum '{path}' | awk '{{print $1}}'; stat -c %a '{path}'; else echo absent; fi", ct)).Trim().Split('\n');
-            if (result[0] != "absent" && (!Regex.IsMatch(result[0], "^[a-f0-9]{64}$") || result.Length != 2 || !Regex.IsMatch(result[1], "^[0-7]{3,4}$")))
-                throw new SafeFailure("An installation target has unexpected file ownership, type or metadata.");
-            files.Add(result[0] == "absent" ? new(path, "", "", false) : new(path, result[0], result.ElementAtOrDefault(1) ?? "", true));
+            files.Add(FileMetadata.Validate(path, await FileMetadata.ReadAsync(router, path, ct)));
         }
         var cron = await router.ExecuteAsync("crontab -l 2>/dev/null || true", ct);
         _ = CronPlanner.Generate(cron, c.Maintenance);

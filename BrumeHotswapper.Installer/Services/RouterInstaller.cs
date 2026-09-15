@@ -58,7 +58,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                 if (path.EndsWith(".sh") || path.EndsWith(".conf")) await router.ExecuteAsync($"sh -n {Q(file)}", ct);
             }
             await router.ExecuteAsync($"sh {Stage}/install-vpn-watch-gl-guard.sh --check", ct);
-            if (CompatibilityCatalog.Classify(c.Router.Rtp2Hash) != Compatibility.AlreadyPatchedKnownCompatible)
+            if (!CompatibilityCatalog.IsPatched(c.Router.Rtp2Hash))
             {
                 step = "Validate GL guard against a private firmware copy";
                 await router.ExecuteAsync($"cp /usr/bin/rtp2.sh {Stage}/rtp2.preview && chmod 600 {Stage}/rtp2.preview && VPN_WATCH_RTP2_TARGET={Stage}/rtp2.preview sh {Stage}/install-vpn-watch-gl-guard.sh --install", ct);
@@ -68,7 +68,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             foreach (var before in fresh.Files)
             {
                 bool firmware = before.Path == "/usr/bin/rtp2.sh";
-                if (firmware && CompatibilityCatalog.Classify(c.Router.Rtp2Hash) == Compatibility.AlreadyPatchedKnownCompatible) continue;
+                if (firmware && CompatibilityCatalog.IsPatched(c.Router.Rtp2Hash)) continue;
                 if (!firmware && before.Exists && before.Hash == Hash(content[before.Path]) && before.Mode == (before.Path.EndsWith(".sh") ? "700" : "600")) continue;
                 if (before.Exists)
                 {
@@ -109,7 +109,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             if (created.Count > 0) await router.ExecuteAsync("/etc/init.d/dnsmasq reload", ct);
             await router.UploadAsync(Stage + "/firmware-intent.json", JsonSerializer.Serialize(new { Before = c.Router.Rtp2Hash, After = expectedFirmwareHash }), ct);
             step = "Apply GL reconciliation guard"; progress.Report(step);
-            if (CompatibilityCatalog.Classify(c.Router.Rtp2Hash) != Compatibility.AlreadyPatchedKnownCompatible)
+            if (!CompatibilityCatalog.IsPatched(c.Router.Rtp2Hash))
             {
                 var before = fresh.Files.Single(f => f.Path == "/usr/bin/rtp2.sh");
                 // The authoritative patcher makes its original-file, SHA-named backup as well.
@@ -253,7 +253,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
         await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
         // A real router-side delivery test is part of the explicitly enabled notification configuration.
         if (c.Notifications) await router.ExecuteAsync("/root/vpn-watch.sh notify_test", ct);
-        return ["VPN Watch: Running", CompatibilityCatalog.Classify(c.Router.Rtp2Hash) == Compatibility.AlreadyPatchedKnownCompatible ? "GL Guard: Already installed" : "GL Guard: Installed", "VPN ACTIVE: Verified (standby availability may vary)", "Supervisor and schedules: Verified",
+        return ["VPN Watch: Running", CompatibilityCatalog.IsPatched(c.Router.Rtp2Hash) ? "GL Guard: Already installed" : "GL Guard: Installed", "VPN ACTIVE: Verified (standby availability may vary)", "Supervisor and schedules: Verified",
             c.Notifications ? "Notifications: Enabled and tested" : "Notifications: Disabled",
             c.Maintenance ? "Maintenance: Enabled" : "Maintenance: Disabled"];
     }

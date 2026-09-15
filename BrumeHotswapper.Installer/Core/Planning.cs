@@ -9,14 +9,14 @@ public static class CompatibilityCatalog
 {
     public const string StockHash = "749518706ad6af15104c90ddba5aa99142e1a9c678fec9074cd4222f8595f82c";
     public static readonly HashSet<string> TestedFirmware = ["4.9.0"];
-    // Reproduced from exact StockHash bytes and the archived/current guard generator.
-    // The reported 5b1a... file is absent from available evidence and remains Unknown.
-    // See docs/guard-hash-investigation.md; a shared marker alone never proves compatibility.
+    // Both exact stock-plus-guard forms are reproduced in tooling/verify_guard_archive.py.
     public const string PatchedHash = "c46469acec44023282fd1d6f729f34ab1b7fd5020ed0c83fc1852a091c2bf075";
+    public const string HistoricalPatchedHash = "5b1a898d8a4943d256f0674c0050519f1ec1353327f7de0778e1c760d3e57704";
+    public static bool IsPatched(string hash) => Classify(hash) is Compatibility.AlreadyPatchedKnownCompatible or Compatibility.HistoricalGuardKnownCompatible;
     public static readonly HashSet<string> IncompatibleHashes = new(StringComparer.OrdinalIgnoreCase);
     public static Compatibility Classify(string hash) => IncompatibleHashes.Contains(hash) ? Compatibility.KnownIncompatible
         : hash.Equals(StockHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.StockKnownCompatible
-        : hash.Equals(PatchedHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.AlreadyPatchedKnownCompatible : Compatibility.Unknown;
+        : hash.Equals(PatchedHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.AlreadyPatchedKnownCompatible : hash.Equals(HistoricalPatchedHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.HistoricalGuardKnownCompatible : Compatibility.Unknown;
 }
 public interface IVpnLocationResolver { IReadOnlyList<VpnLocationGroup> Group(IEnumerable<VpnConnection> peers); }
 // Verified GL 4.9.0 country,city metadata. Identity is scoped to this provider layout,

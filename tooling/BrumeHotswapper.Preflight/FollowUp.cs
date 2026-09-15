@@ -17,8 +17,9 @@ public sealed partial class Runner
         await Step("SFTP diagnostics", async () =>
         {
             var diagnostic = await session.ProbeFirmwareSftpAsync(ct);
-            report(new("SFTP diagnostics", diagnostic.StartsWith("SFTP connect,") ? "PASS" : "WARN", diagnostic + " Installation uploads still require verified SFTP capability."));
+            report(new("SFTP diagnostics", diagnostic.StartsWith("SFTP connect,") ? "PASS" : "WARN", diagnostic + " SFTP is optional when the SSH stream capability passes."));
         });
+        await Step("Upload channel capability (no files)", async () => { var kind = await session.ProbeUploadAsync(ct); Add("Upload channel capability (no files)", true, "Verified " + kind + "; synthetic stdin hashed without creating router files."); });
         await Step("Firmware bytes", async () => await FirmwareAsync(identity, ct));
     }
     public async Task RunFollowUpAsync(RouterIdentity identity, CancellationToken ct)
@@ -26,8 +27,12 @@ public sealed partial class Runner
         Add("Connection identity consistency", identity.IsBrume && identity.Firmware == "4.9.0", "Rechecked identity/version for this new session; previously proven full discovery is not repeated.");
         if (!identity.IsBrume) return;
         await FirmwareChecksAsync(identity, ct);
+        await Step("Pending transaction", async () => {
+            var pending = (await read.ExecuteAsync("if [ -e /root/.hotswap-installer/transaction ] || [ -e /tmp/vpn-watch-installer-lock ]; then echo pending; else echo clear; fi", ct)).Trim();
+            Add("Pending transaction", pending == "clear", pending == "clear" ? "No pending transaction or lock." : "Pending transaction or lock requires review.");
+        });
         foreach (string path in DeploymentPlanning.Paths)
-            await Step("File " + path, async () => { foreach (var item in MetadataReview.Evaluate(path, await read.ExecuteAsync(ReadOnlyTransport.FileMetadata(path), ct))) report(item); });
+            await Step("File " + path, async () => { foreach (var item in MetadataReview.Evaluate(path, string.Join("\n", (await FileMetadata.ReadAsync(read, path, ct)).Select(f => f.Key + "=" + f.Value)))) report(item); });
         await Step("Routing follow-up", async () =>
         {
             var policies = await read.ExecuteAsync(ReadOnlyTransport.Policies, ct);
@@ -56,8 +61,16 @@ public sealed partial class Runner
             report(new("ROUTE_POLICY shape", "WARN", RoutingEvidence.Sanitize(await read.ExecuteAsync("iptables -w -t mangle -S ROUTE_POLICY", ct))));
             var policyRules = await read.ExecuteAsync("ip -4 rule show", ct);
             report(new("IPv4 policy-rule shapes", "WARN", RoutingEvidence.Sanitize(policyRules)));
-            var tables = RoutingEvidence.SelectedTables(policyRules, mark);
-            report(new("Selected lookup candidates", "WARN", tables.Count + " selected-mark table(s) found by diagnostic parser. This parser does not grant compatibility."));
+            var tables = RoutingEvidence.SelectedTables(policyRules, mark).ToHashSet();
+            // Include earlier numeric lookups that the production verifier must inspect.
+            var selectedRule = Regex.Match(policyRules, $@"(?m)^\s*(\d+):\s+from all fwmark {Regex.Escape(mark)}/0xf000 lookup ");
+            if (selectedRule.Success && int.TryParse(selectedRule.Groups[1].Value, out int selectedPriority))
+                foreach (var line in policyRules.Split('\n')) {
+                    var earlier = Regex.Match(line, @"^\s*(\d+):.*\blookup ([0-9]+)\b");
+                    if (earlier.Success && int.TryParse(earlier.Groups[1].Value, out int priority) && priority < selectedPriority && RoutingProtection.CanMatch(line, Convert.ToUInt32(mark[2..],16)))
+                        tables.Add(earlier.Groups[2].Value);
+                }
+            report(new("Selected lookup candidates", "WARN", tables.Count + " selected/earlier table(s) found by diagnostic parser. This parser does not grant compatibility."));
             int index = 0;
             foreach (var table in tables)
             {

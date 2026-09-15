@@ -108,3 +108,7 @@ Finish with findings and blockers. No mutation follows automatically from a succ
 ## Completed preflight and local corrections
 
 See [live preflight findings](live-preflight-findings.md) for verified observations, unresolved evidence gaps, local fixes and the additional-only follow-up. The original SFTP failure did not establish its exact cause, and 5b1a remains unclassified.
+
+## Final resolution supersedes earlier unknown findings
+
+See [final blocker resolution](final-blocker-resolution.md). The 5b1a variant has now been reproduced exactly and classified as historical compatible. Metadata, routing and upload transport have focused corrections; one final read-only preflight remains required.

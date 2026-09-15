@@ -69,7 +69,7 @@ public sealed partial class Runner(SshRouterSession session, string repository, 
         foreach (string path in DeploymentPlanning.Paths)
             await Step("File " + path, async () =>
             {
-                foreach (var check in MetadataReview.Evaluate(path, await read.ExecuteAsync(ReadOnlyTransport.FileMetadata(path), ct))) report(check);
+                foreach (var check in MetadataReview.Evaluate(path, string.Join("\n", (await FileMetadata.ReadAsync(read, path, ct)).Select(f => f.Key + "=" + f.Value)))) report(check);
             });
         await Step("DHCP/LAN", async () =>
         {
@@ -161,21 +161,22 @@ public sealed partial class Runner(SshRouterSession session, string repository, 
         {
             var actualGuard = Encoding.UTF8.GetString(bytes.AsSpan(insertion, extra));
             var expectedGuard = Encoding.UTF8.GetString(expected.AsSpan(insertion, expected.Length-stock.Length));
-            bool equal = actualGuard == expectedGuard;
+            bool historical = Hash(bytes) == CompatibilityCatalog.HistoricalPatchedHash && actualGuard == expectedGuard.Replace("args=%s\n", "args=%s\\n");
+            bool equal = actualGuard == expectedGuard || historical;
             bool whitespace = Regex.Replace(actualGuard, @"\s", "") == Regex.Replace(expectedGuard, @"\s", "");
-            report(new("Guard comparison", equal ? "PASS" : "WARN", equal ? "Live guard exactly equals reproducible guard." : $"Guard differs; whitespace-only: {whitespace}; expected bytes: {Encoding.UTF8.GetByteCount(expectedGuard)}; actual bytes: {extra}."));
+            report(new("Guard comparison", equal ? "PASS" : "WARN", equal ? historical ? "Verified historical printf newline encoding; exact reproduced historical hash." : "Live guard exactly equals reproducible guard." : $"Guard differs; whitespace-only: {whitespace}; expected bytes: {Encoding.UTF8.GetByteCount(expectedGuard)}; actual bytes: {extra}."));
             var knownLines = expectedGuard.Split('\n'); var liveLines = actualGuard.Split('\n');
             int missing = knownLines.Count(x => !liveLines.Contains(x)), added = liveLines.Count(x => !knownLines.Contains(x));
             report(new("Guard diff summary", equal ? "PASS" : "WARN", $"Missing/changed expected lines: {missing}; added/changed live lines: {added}. Non-guard proprietary contents withheld."));
             // Emit only differences that are demonstrably whitespace changes to known guard lines.
-            foreach (var line in liveLines.Where(x => !knownLines.Contains(x)))
+            foreach (var line in liveLines.Where(x => !equal && !knownLines.Contains(x)))
             {
                 var known = knownLines.FirstOrDefault(x => Regex.Replace(x, @"\s", "") == Regex.Replace(line, @"\s", ""));
                 if (known != null) report(new("Guard formatting difference", "WARN", "Known guard line " + Array.IndexOf(knownLines, known) + ": leading whitespace " + (known.Length-known.TrimStart().Length) + " -> " + (line.Length-line.TrimStart().Length) + "; CR present: " + line.Contains('\r') + "."));
                 else report(new("Guard semantic difference", "WARN", "Unmatched guard line withheld; length " + line.Length + ", SHA-256 " + Hash(Encoding.UTF8.GetBytes(line)) + "."));
             }
         }
-        Add("Compatibility classification", CompatibilityCatalog.Classify(Hash(bytes)) == Compatibility.AlreadyPatchedKnownCompatible, "Current catalog: " + CompatibilityCatalog.Classify(Hash(bytes)) + ". No catalog changes are made by preflight.");
+        Add("Compatibility classification", CompatibilityCatalog.IsPatched(Hash(bytes)), "Current catalog: " + CompatibilityCatalog.Classify(Hash(bytes)) + ". No catalog changes are made by preflight.");
         Array.Clear(bytes); Array.Clear(stock); Array.Clear(expected);
     }
 }

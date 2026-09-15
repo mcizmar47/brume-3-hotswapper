@@ -34,7 +34,7 @@ public static class DeploymentPlanning
         foreach (var r in reservations)
             if (!snapshot.Lan.Network.ContainsHost(r.Ip) || snapshot.Lan.RouterAddresses?.Contains(r.Ip) == true) throw new SafeFailure("A protected device address is outside the usable LAN subnet. Refresh LAN discovery.");
         var c = config with { Guards = reservations.Select(r => new LanClient("", r.Ip, r.Mac, !r.Create)).ToArray() };
-        var guard = CompatibilityCatalog.Classify(snapshot.Router.Rtp2Hash) == Compatibility.AlreadyPatchedKnownCompatible
+        var guard = CompatibilityCatalog.IsPatched(snapshot.Router.Rtp2Hash)
             ? "Already installed — no change" : "Install structural reconciliation guard";
         var changes = snapshot.Files.Where(f => f.Path != "/usr/bin/rtp2.sh").Select(f => $"{(f.Exists ? "Update" : "Install")} {f.Path}").ToList();
         changes.Add(guard);

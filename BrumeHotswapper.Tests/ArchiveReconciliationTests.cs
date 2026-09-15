@@ -178,8 +178,8 @@ public class ArchiveReconciliationTests
         Assert.DoesNotContain(router.Commands, cmd => cmd.Contains("uci delete") || cmd.StartsWith("rm -rf"));
         Assert.Contains(fake.Uploads.Keys, k => k.EndsWith("journal.json"));
     }
-    [Fact] public void PreviouslyReportedButUnreproducedPatchHashIsUnknown()
+    [Fact] public void HistoricalPatchHashRetainsVariantIdentity()
     {
-        Assert.Equal(Compatibility.Unknown, CompatibilityCatalog.Classify("5b1a898d8a4943d256f0674c0050519f1ec1353327f7de0778e1c760d3e57704"));
+        Assert.Equal(Compatibility.HistoricalGuardKnownCompatible, CompatibilityCatalog.Classify("5b1a898d8a4943d256f0674c0050519f1ec1353327f7de0778e1c760d3e57704"));
     }
 }

@@ -135,7 +135,16 @@ public class SecondPassTests
         {
             ct.ThrowIfCancellationRequested();
             string result="";
-            if(cmd=="ubus call system board") result="{\"model\":\"GL.iNet GL-MT5000\",\"board_name\":\"glinet,gl-mt5000\"}";
+            var metadata = DeploymentPlanning.Paths.SelectMany(p => FileMetadata.Commands(p).Select(f => (Path:p, Field:f.Key, Command:f.Value))).FirstOrDefault(f => f.Command == cmd);
+            if (metadata.Command != null) {
+                bool exists = metadata.Path == "/usr/bin/rtp2.sh" || Installed.ContainsKey(metadata.Path);
+                result = metadata.Field switch {
+                    "symlink" => "0", "exists" => exists ? "1" : "0", "regular" or "readable" => "1",
+                    "uid" or "gid" => "0", "mode" => metadata.Path == "/usr/bin/rtp2.sh" ? "755" : metadata.Path.EndsWith(".sh") ? "700" : "600",
+                    "size" => "123", "sha256" => metadata.Path == "/usr/bin/rtp2.sh" ? FirmwareHash : Hash(Installed[metadata.Path]), _ => ""
+                };
+            }
+            else if(cmd=="ubus call system board") result="{\"model\":\"GL.iNet GL-MT5000\",\"board_name\":\"glinet,gl-mt5000\"}";
             else if(cmd.StartsWith("sha256sum /usr/bin/rtp2.sh")) result=FirmwareHash;
             else if(cmd.StartsWith("sha256sum /root/.hotswap-installer/transaction/rtp2.preview")) result=CompatibilityCatalog.PatchedHash;
             else if(cmd=="uci -q get route_policy.vpn.group_id" || cmd=="uci -q get wireguard.peer_11.group_id") result="7";
@@ -145,7 +154,7 @@ public class SecondPassTests
             else if(cmd.StartsWith("uci -q get network.wgclient1.config")) result="peer_11";
             else if(cmd=="uci -q get wireguard.peer_11.location") result="Germany,Frankfurt";
             else if(cmd.StartsWith("uci -q show route_policy")) result="vpn";
-            else if(cmd.StartsWith("grep -Fc '# vpn-watch")) result=FirmwareHash==CompatibilityCatalog.PatchedHash?"1":"0";
+            else if(cmd.StartsWith("grep -Fc '# vpn-watch")) result=CompatibilityCatalog.IsPatched(FirmwareHash)?"1":"0";
             else if(cmd.StartsWith("test ! -L '/") && cmd.Contains("stat -c %a"))
             {
                 var path=Regex.Match(cmd,@"test ! -L '([^']+)'").Groups[1].Value;

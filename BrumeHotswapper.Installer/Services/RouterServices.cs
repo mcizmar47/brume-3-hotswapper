@@ -37,8 +37,9 @@ public static class RouterDiscovery
         catch (Exception e) when (e is SocketException or OperationCanceledException) { ct.ThrowIfCancellationRequested(); return false; }
     }
 }
-public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRouterSession, IRouterTransport
+public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRouterSession, IRouterTransport, IUploadChannel
 {
+    private DeploymentUpload? upload;
     private InstallationPlan? reviewedPlan;
     private SshClient? ssh;
     private RouterIdentity? identity;
@@ -109,23 +110,63 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
             c.Maintenance != reviewedPlan.Configuration.Maintenance ||
             !c.Guards.Select(d => d.Mac.ToLowerInvariant()).Order().SequenceEqual(reviewedPlan.Configuration.Guards.Select(d => d.Mac.ToLowerInvariant()).Order()))
             throw new SafeFailure("The wizard choices changed. Review the updated plan before installing.");
+        await ProbeUploadAsync(ct);
         return await new RouterInstaller(this, new KillSwitchVerifier()).InstallAsync(reviewedPlan, progress, ct);
     }
     public async Task UploadAsync(string path, string content, CancellationToken ct)
     {
-        if (ssh?.IsConnected != true || identity == null) throw new SafeFailure("Reconnect to the router before uploading.");
-        if (!path.StartsWith("/root/.hotswap-installer/transaction/", StringComparison.Ordinal))
-            throw new SafeFailure("Upload path is outside protected staging.");
-        using var sftp = new SftpClient(ssh.ConnectionInfo);
-        sftp.HostKeyReceived += (_, e) =>
-        {
+        RequireBrume();
+        byte[] bytes = Encoding.UTF8.GetBytes(content);
+        try { await (upload ??= new DeploymentUpload(this)).UploadAsync(path, bytes, ct); }
+        finally { Array.Clear(bytes); }
+    }
+    public Task<UploadKind> ProbeUploadAsync(CancellationToken ct)
+    { RequireBrume(); return (upload ??= new DeploymentUpload(this)).ProbeAsync(ct); }
+    Task<string> IUploadChannel.CommandAsync(string command, CancellationToken ct) => ExecuteAsync(command, ct);
+    async Task<string> IUploadChannel.StreamAsync(string command, ReadOnlyMemory<byte> bytes, CancellationToken ct)
+    {
+        if (ssh?.IsConnected != true) throw new SafeFailure("SSH transport disconnected.");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        using var cmd = ssh.CreateCommand(command); cmd.CommandTimeout = TimeSpan.FromSeconds(30);
+        var execution = cmd.ExecuteAsync(timeout.Token);
+        try {
+            using (var input = cmd.CreateInputStream())
+                for (int i = 0; i < bytes.Length; i += 8192)
+                {
+                    timeout.Token.ThrowIfCancellationRequested();
+                    await input.WriteAsync(bytes.Slice(i, Math.Min(8192, bytes.Length - i)), timeout.Token);
+                }
+            await execution;
+            if (cmd.ExitStatus != 0) throw new SafeFailure("SSH stream operation failed; details withheld.");
+            if (cmd.Result.Length > 256) throw new SafeFailure("Unexpected SSH stream response.");
+            return cmd.Result;
+        } catch {
+            timeout.Cancel();
+            try { await execution; } catch { }
+            throw;
+        }
+    }
+    private SftpClient NewSftp()
+    {
+        if (ssh?.IsConnected != true || identity == null) throw new SafeFailure("SSH transport disconnected.");
+        var client = new SftpClient(ssh.ConnectionInfo) { OperationTimeout = TimeSpan.FromSeconds(15) };
+        client.HostKeyReceived += (_, e) => {
             var key = "SHA256:" + Convert.ToBase64String(SHA256.HashData(e.HostKey)).TrimEnd('=');
             e.CanTrust = trusted.TryGetValue(identity.Address, out var accepted) && key == accepted;
         };
-        await sftp.ConnectAsync(ct);
-        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(content));
-        await sftp.UploadFileAsync(stream, path, ct);
-        await Task.Run(() => sftp.ChangePermissions(path, 384), ct); // 0600
+        return client;
+    }
+    async Task<bool> IUploadChannel.SftpAvailableAsync(CancellationToken ct)
+    {
+        using var client = NewSftp(); await client.ConnectAsync(ct); return client.IsConnected;
+    }
+    async Task IUploadChannel.SftpAsync(string path, ReadOnlyMemory<byte> bytes, CancellationToken ct)
+    {
+        using var client = NewSftp(); await client.ConnectAsync(ct);
+        byte[] copy = bytes.ToArray();
+        try { using var stream = new MemoryStream(copy); await client.UploadFileAsync(stream, path, ct); }
+        finally { Array.Clear(copy); }
     }
     // Fixed-path raw SSH read. Do not access Result: decoding text could alter firmware bytes.
     public async Task<byte[]> ReadFirmwareBytesAsync(CancellationToken ct)
@@ -166,7 +207,7 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
         catch (Exception e) { return "SFTP failed during " + stage + ": " + FirmwareRead.FailureCategory(e); }
     }
     private void RequireBrume() { if (identity?.IsBrume != true) throw new SafeFailure("Device verification must identify a GL-MT5000 before continuing."); }
-    public void Dispose() { ssh?.Dispose(); ssh = null; identity = null; reviewedPlan = null; }
+    public void Dispose() { ssh?.Dispose(); ssh = null; identity = null; reviewedPlan = null; upload = null; }
 }
 public static class NtfyService
 {

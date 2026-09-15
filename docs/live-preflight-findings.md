@@ -66,3 +66,7 @@ No successful result authorizes installation automatically. The current build is
 - Release build of BrumeHotswapper.Preflight into artifacts/preflight-followup: success, zero warnings/errors; not launched.
 
 Tests cover read-only command rejection (including guard --check and uploads), real discovery/inspection/verifier calls through the allowlist, binary reads/limits/cancellation, sanitized diagnostics, metadata classification, diagnostic rule parsing/redaction and larger generated pools. They do not substitute for missing live evidence.
+
+## Superseding final correction
+
+See [final blocker resolution](final-blocker-resolution.md) for the second live run, exact historical guard proof, corrected metadata/routing inspection and verified SSH upload transport. Earlier unresolved conclusions above are retained as history.

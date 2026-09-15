@@ -10,14 +10,6 @@ public sealed class ReadOnlyTransport(IRouterTransport inner) : IRouterTransport
     public static readonly string Policies = "uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.tunnel_id='\\([0-9]*\\)'$/\\1 \\2/p\"";
     public static readonly string Hosts = "uci -q show dhcp | sed -n 's/^dhcp\\.\\([^.=]*\\)=host$/\\1/p'";
     public static readonly string Daemons = "for f in /proc/[0-9]*/cmdline; do [ -r \"$f\" ] || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq '/root/vpn-watch.sh' || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq daemon || continue; basename \"$(dirname \"$f\")\"; done";
-    public static string FileMetadata(string path) =>
-        $"if [ -L '{path}' ]; then echo symlink=1; else echo symlink=0; fi; " +
-        $"if [ -e '{path}' ]; then echo exists=1; " +
-        $"if [ -f '{path}' ]; then echo regular=1; else echo regular=0; fi; " +
-        $"if [ -r '{path}' ]; then echo readable=1; else echo readable=0; fi; " +
-        $"printf 'uid='; stat -c %u '{path}'; printf 'gid='; stat -c %g '{path}'; " +
-        $"printf 'mode='; stat -c %a '{path}'; printf 'size='; stat -c %s '{path}'; " +
-        $"printf 'sha256='; sha256sum '{path}' | awk '{{print $1}}'; else echo exists=0; fi";
     public static string SlotReferences(string slot) => $"uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.via='{slot}'$/\\1/p\"";
     public static string ProfileMembers(string tunnel) => $"sed -n '/^[0-9][0-9]*_[0-9][0-9]*$/p' /etc/vpn_profiles.d/profile{tunnel}";
     private static readonly HashSet<string> Exact = [Policies, Hosts, Daemons,
@@ -34,7 +26,7 @@ public sealed class ReadOnlyTransport(IRouterTransport inner) : IRouterTransport
     public static bool IsAllowed(string command)
     {
         if (Exact.Contains(command)) return true;
-        if (DeploymentPlanning.Paths.Any(p => command == FileMetadata(p))) return true;
+        if (DeploymentPlanning.Paths.Any(p => BrumeHotswapper.Installer.Services.FileMetadata.Commands(p).Values.Contains(command))) return true;
         if (new[] { "wgclient1", "wgclient2", "wgclient3" }.Any(slot => command == SlotReferences(slot) || command == $"if ip link show {slot} >/dev/null 2>&1; then echo present; fi" || command == $"wg show {slot} latest-handshakes | awk '{{print $2}}'")) return true;
         string policy = @"(?:[A-Za-z0-9_]+|'@rule\[[0-9]+\]')";
         string key = @"(?:route_policy\." + policy + @"\.(?:group_id|tunnel_id|via|peer_id|mark|enabled|killswitch)|wireguard\.peer_[0-9]+\.(?:group_id|location)|network\.(?:wgclient[123]\.config|lan\.(?:ipaddr|netmask))|dhcp\.lan\.(?:start|limit)|'dhcp\.(?:[A-Za-z0-9_]+|@host\[[0-9]+\])\.(?:mac|ip)')";

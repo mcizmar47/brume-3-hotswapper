@@ -16,12 +16,12 @@ public class DiscoveryTests
         });
         Assert.Same(profiles[0],VpnDiscovery.AutoSelect([profiles[0]]));
     }
-    [Fact] public void UnknownGuardRequiresAcknowledgementInWizard()
+    [Fact] public void UnknownGuardCannotBypassCompatibilityGate()
     {
         using var vm=new WizardViewModel((_,_)=>false);
         typeof(WizardViewModel).GetProperty(nameof(vm.Router))!.SetValue(vm,new RouterIdentity("192.0.2.1","GL-MT5000","glinet,gl-mt5000","4.9.0","unknown"));
         typeof(WizardViewModel).GetProperty(nameof(vm.Page))!.SetValue(vm,3);
-        Assert.False(vm.NextCommand.CanExecute(null)); vm.UnknownAccepted=true; Assert.True(vm.NextCommand.CanExecute(null));
+        Assert.False(vm.NextCommand.CanExecute(null)); vm.UnknownAccepted=true; Assert.False(vm.NextCommand.CanExecute(null));
     }
     [Fact] public void NormalStartupDoesNotSelectDemo()
     {
