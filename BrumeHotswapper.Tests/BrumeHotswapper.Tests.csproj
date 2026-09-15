@@ -20,4 +20,5 @@
     <ProjectReference Include="../BrumeHotswapper.Installer/BrumeHotswapper.Installer.csproj" />
   </ItemGroup>
 
+  <ItemGroup><ProjectReference Include="../tooling/BrumeHotswapper.Preflight/BrumeHotswapper.Preflight.csproj" /></ItemGroup>
 </Project>

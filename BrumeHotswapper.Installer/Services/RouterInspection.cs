@@ -38,10 +38,13 @@ public sealed class KillSwitchVerifier : IKillSwitchVerifier
             throw new SafeFailure("The kill switch is configured, but the selected policy's VPN marking and DROP rules could not be verified.");
         await router.ExecuteAsync($"iptables -w -t mangle -C ROUTE_POLICY -m addrtype ! --dst-type LOCAL -j {chain}", ct);
         var rules = await router.ExecuteAsync("ip -4 rule show", ct);
+        int markedRules = 0, recognizedLookups = 0, ambiguousLookups = 0, unsafeTables = 0, missingTerminal = 0;
         foreach (var rule in rules.Split('\n').Where(l => l.Contains($"fwmark {mark}/0xf000 ")))
         {
+            markedRules++;
             var table = Regex.Match(rule, $@"^\s*(\d+):\s+from all fwmark {Regex.Escape(mark)}/0xf000 lookup (\d+)\s*$");
             if (!table.Success || int.Parse(table.Groups[1].Value) >= 32766) continue;
+            recognizedLookups++;
             int priority = int.Parse(table.Groups[1].Value);
             bool ambiguousEarlier = rules.Split('\n').Where(l => l.Contains(':')).Any(l =>
             {
@@ -54,16 +57,18 @@ public sealed class KillSwitchVerifier : IKillSwitchVerifier
                 }
                 return true;
             });
-            if (ambiguousEarlier) continue;
+            if (ambiguousEarlier) { ambiguousLookups++; continue; }
             var routes = await router.ExecuteAsync($"ip -4 route show table {table.Groups[2].Value}", ct);
             var defaults = routes.Split('\n').Where(l => l.StartsWith("default ")).ToArray();
             if (routes.Split('\n', StringSplitOptions.RemoveEmptyEntries).Any(l =>
                 !Regex.IsMatch(l.Trim(), @"^(unreachable|blackhole|prohibit) ") &&
-                !Regex.IsMatch(l, $@"\bdev {Regex.Escape(active)}(?: |$)"))) continue;
-            if (defaults.Any(l => !Regex.IsMatch(l, $@"\bdev {Regex.Escape(active)}(?: |$)"))) continue;
+                !Regex.IsMatch(l, $@"\bdev {Regex.Escape(active)}(?: |$)"))) { unsafeTables++; continue; }
+            if (defaults.Any(l => !Regex.IsMatch(l, $@"\bdev {Regex.Escape(active)}(?: |$)"))) { unsafeTables++; continue; }
             if (routes.Split('\n').Any(l => Regex.IsMatch(l.Trim(), @"^(unreachable|blackhole|prohibit) default(?: |$)"))) return;
+            missingTerminal++;
         }
-        throw new SafeFailure("The selected policy's kill-switch enforcement could not be verified: the selected mark has no unambiguous terminal VPN route. Keep the GL kill switch enabled; this runtime layout needs review.");
+        throw new SafeFailure("The selected policy's kill-switch enforcement could not be verified: the selected mark has no unambiguous terminal VPN route. Keep the GL kill switch enabled; this runtime layout needs review. " +
+            $"Routing diagnostics: marked rules={markedRules}, recognized numeric lookups={recognizedLookups}, ambiguous precedence={ambiguousLookups}, non-VPN/unsupported tables={unsafeTables}, terminal defaults absent={missingTerminal}.");
     }
     public static bool HasPolicyRules(string output, string chain, string mark)
     {

@@ -68,7 +68,7 @@ grep -Fxc 'cmd="$1";shift' /usr/bin/rtp2.sh
 sh -n /usr/bin/rtp2.sh
 ```
 
-If an installed guard patcher or original firmware backup exists, read its SHA/size too. Do not execute it, even with --check. If rtp2 is 5b1a or any other unknown hash, read the file through SFTP **into host memory only**, verify the SHA again, and compare against the locally generated guarded stock. Check all diff regions; removing the exact guard must restore known stock before calling it a stock-plus-guard variant. Report sanitized structure/hashes, not proprietary contents. A hash-only read cannot resolve provenance.
+If an installed guard patcher or original firmware backup exists, read its SHA/size too. Do not execute it, even with --check. If rtp2 is 5b1a or any other unknown hash, read the file through raw SSH stdout **into host memory only**, verify the SHA again, and compare against the locally generated guarded stock. Check all diff regions; removing the exact guard must restore known stock before calling it a stock-plus-guard variant. Report sanitized structure/hashes, not proprietary contents. A hash-only read cannot resolve provenance.
 
 ### 2. Selected policy and profile membership
 
@@ -104,3 +104,7 @@ Read crontab with crontab -l; pending installer transaction/lock existence; inst
 
 Finish with findings and blockers. No mutation follows automatically from a successful read-only preflight.
 
+
+## Completed preflight and local corrections
+
+See [live preflight findings](live-preflight-findings.md) for verified observations, unresolved evidence gaps, local fixes and the additional-only follow-up. The original SFTP failure did not establish its exact cause, and 5b1a remains unclassified.

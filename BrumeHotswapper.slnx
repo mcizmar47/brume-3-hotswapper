@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="BrumeHotswapper.Installer/BrumeHotswapper.Installer.csproj" />
   <Project Path="BrumeHotswapper.Tests/BrumeHotswapper.Tests.csproj" />
+  <Project Path="tooling/BrumeHotswapper.Preflight/BrumeHotswapper.Preflight.csproj" />
 </Solution>
