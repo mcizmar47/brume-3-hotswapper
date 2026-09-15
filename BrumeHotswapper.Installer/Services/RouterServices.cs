@@ -23,15 +23,37 @@ public interface IRouterSession : IDisposable
 }
 public static class RouterDiscovery
 {
-    // Bounded to directly attached default gateways: no subnet-wide password spraying.
-    public static IReadOnlyList<string> Candidates() => NetworkInterface.GetAllNetworkInterfaces()
+    public sealed record LocalNetwork(string Address, int Prefix, IReadOnlyList<string> Gateways);
+    public static IReadOnlyList<string> Candidates() => Candidates(NetworkInterface.GetAllNetworkInterfaces()
         .Where(n => n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-        .SelectMany(n => n.GetIPProperties().GatewayAddresses)
-        .Select(g => g.Address).Where(a => a.AddressFamily == AddressFamily.InterNetwork && !a.Equals(IPAddress.Any))
-        .Select(a => a.ToString()).Distinct().Take(8).ToArray();
+        .SelectMany(n => {
+            var properties = n.GetIPProperties();
+            var gateways = properties.GatewayAddresses.Select(g => g.Address).Where(a => a.AddressFamily == AddressFamily.InterNetwork).Select(a => a.ToString()).ToArray();
+            return properties.UnicastAddresses.Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
+                .Select(a => new LocalNetwork(a.Address.ToString(), a.PrefixLength, gateways));
+        }));
+    // Probe gateways first, then two conventional edge hosts per directly attached subnet.
+    // Never enumerate a subnet or use a fixed router address.
+    public static IReadOnlyList<string> Candidates(IEnumerable<LocalNetwork> networks)
+    {
+        var local = networks.ToArray();
+        var own = local.Select(n => n.Address).ToHashSet();
+        var candidates = local.SelectMany(n => n.Gateways).ToList();
+        foreach (var n in local.Where(n => n.Prefix is >= 8 and <= 30))
+        {
+            if (!IPAddress.TryParse(n.Address, out var ip) || ip.AddressFamily != AddressFamily.InterNetwork) continue;
+            var bytes = ip.GetAddressBytes();
+            uint value = (uint)bytes[0]<<24 | (uint)bytes[1]<<16 | (uint)bytes[2]<<8 | bytes[3];
+            uint mask = uint.MaxValue << (32-n.Prefix), network = value & mask;
+            foreach (uint host in new[] { network+1, network|(~mask-1) })
+                candidates.Add(new IPAddress(new byte[]{(byte)(host>>24),(byte)(host>>16),(byte)(host>>8),(byte)host}).ToString());
+        }
+        return candidates.Where(a => IPAddress.TryParse(a,out var ip) && ip.AddressFamily==AddressFamily.InterNetwork &&
+            !IPAddress.IsLoopback(ip) && !ip.Equals(IPAddress.Any) && !own.Contains(a)).Distinct().Take(16).ToArray();
+    }
     public static async Task<bool> HasSshAsync(string address, CancellationToken ct)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(1));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(2));
         using var tcp = new TcpClient();
         try { await tcp.ConnectAsync(address, 22, timeout.Token); return true; }
         catch (Exception e) when (e is SocketException or OperationCanceledException) { ct.ThrowIfCancellationRequested(); return false; }
@@ -84,7 +106,7 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
         if (ssh?.IsConnected != true) throw new SafeFailure("The SSH session is disconnected. Reconnect to the router.");
         using var cmd = ssh.CreateCommand(command); cmd.CommandTimeout = TimeSpan.FromSeconds(12);
         await cmd.ExecuteAsync(ct);
-        if (cmd.ExitStatus != 0) throw new SafeFailure("A required router command failed. No raw router output was added to the report.");
+        if (cmd.ExitStatus != 0) throw new RouterCommandFailure(cmd.ExitStatus);
         if (cmd.Result.Length > 512_000) throw new SafeFailure("Router response exceeded the expected size.");
         return cmd.Result;
     }
@@ -215,8 +237,7 @@ public static class NtfyService
 {
     public static async Task TestAsync(string url, bool demo, CancellationToken ct)
     {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != "https" || !string.IsNullOrEmpty(uri.UserInfo) || url.Any(char.IsControl))
-            throw new SafeFailure("Enter a valid HTTPS ntfy topic URL.");
+        var uri = new Uri(NtfyTopic.Normalize(url));
         if (demo) { await Task.Delay(250, ct); return; }
         using var handler = new HttpClientHandler { AllowAutoRedirect = false };
         using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };

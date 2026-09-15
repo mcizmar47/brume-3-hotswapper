@@ -128,6 +128,27 @@ for setting in ['0','1']:
             assert result.returncode == 0, (setting, fail, result.stdout, result.stderr)
 print('PASS: real promotion and consistency-failure rollback preserve killswitch=0 and killswitch=1')
 
+# Exercise production argv matching on local NUL-delimited synthetic /proc records.
+runtime_source = (ROOT / 'BrumeHotswapper.Installer/Services/HotswapRuntime.cs').read_text(encoding='utf-8')
+match_line = next(l for l in runtime_source.splitlines() if 'public const string MatchFunction =' in l)
+match_function = json.loads(match_line.split(' = ',1)[1].rstrip(';'))
+with tempfile.TemporaryDirectory(prefix='brume-argv-') as local:
+    cmdline = pathlib.Path(local) / 'cmdline'
+    for argv, expected in [
+        (['/bin/sh','/root/vpn-watch.sh','daemon'],'daemon'),
+        (['/root/vpn-watch.sh','run'],'daemon'),
+        (['/bin/sh','/root/vpn-watch-supervisor.sh','--installer'],'supervisor'),
+        (['/root/vpn-watch-supervisor.sh'],'supervisor'),
+        (['/bin/sh','-c','/root/vpn-watch.sh daemon'],''),
+        (['/root/vpn-watch.sh daemon'],''),
+        (['/root/not-vpn-watch.sh','daemon'],''),
+        (['/root/vpn-watch.sh','status'],''),
+        (['/root/vpn-watch.sh','daemon','extra'],''),
+    ]:
+        cmdline.write_bytes(b'\0'.join(a.encode() for a in argv)+b'\0')
+        assert run(match_function + "\nowned '" + cmdline.as_posix() + "'") == expected
+print('PASS: exact argv ownership rejects shell wrappers, unrelated scripts and status commands')
+
 # Hashes from the locally inspected historical v14.1 functions. No archive files needed.
 # Promotion baseline normalizes only the two notification wording changes.
 for name, expected in json.loads((ROOT / 'tooling/fastpath-baseline.json').read_text()).items():

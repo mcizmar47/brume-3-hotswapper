@@ -35,7 +35,7 @@
      <TextBlock Text="Administrator password" Margin="0,12,0,0"/>
      <PasswordBox x:Name="RouterPassword" MaxWidth="440" HorizontalAlignment="Left" Width="440"/>
      <Button Content="Find my Brume 3" Click="FindRouter" HorizontalAlignment="Left"/>
-     <TextBlock Text="Checks up to eight local IPv4 gateways with short timeouts and at most one credential attempt per candidate. Confirm the SSH fingerprint before authentication." Foreground="#667386" Margin="0,12,0,22"/>
+     <TextBlock Text="Checks local IPv4 gateways and subnet edge addresses with short timeouts; no subnet scan. At most four SSH authentication attempts, one per candidate. Manual IPv4 remains available." Foreground="#667386" Margin="0,12,0,22"/>
      <Separator/><TextBlock Text="Manual fallback · router IPv4 address" Margin="0,22,0,0"/>
      <TextBox Text="{Binding ManualAddress, UpdateSourceTrigger=PropertyChanged}" MaxWidth="440" HorizontalAlignment="Left" Width="440"/>
      <Button Content="Try address" Click="TryRouter" HorizontalAlignment="Left"/>
@@ -82,8 +82,8 @@
      <TextBlock Text="Optional ntfy notifications" FontSize="19" FontWeight="SemiBold"/>
      <TextBlock Text="Notify on major tier changes. Moves between locations in the same tier stay silent."/>
      <CheckBox IsChecked="{Binding Notifications}" Content="Configure notifications"/>
-     <TextBlock Text="Private HTTPS ntfy topic URL"/>
-     <PasswordBox x:Name="NtfyPassword" PasswordChanged="NtfyChanged" IsEnabled="{Binding Notifications}"/>
+     <TextBlock Text="ntfy topic or URL"/>
+     <TextBox Text="{Binding NtfyUrl, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding Notifications}"/>
      <Button Content="Test notification" Command="{Binding TestNotificationCommand}" HorizontalAlignment="Left"/>
      <TextBlock Text="The test is sent from this PC. Your private URL is kept only for this session and stored securely on the router when you install." Foreground="#667386" Margin="0,18,0,0"/>
     </StackPanel>

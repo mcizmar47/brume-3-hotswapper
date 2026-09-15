@@ -1,5 +1,8 @@
 # Windows installer: reconciliation pass
 
+Current deployment and recovery behavior: [installer simplification](installer-simplification.md). This supersedes older descriptions below that prohibit all recovery after startup.
+
+
 The existing GL.iNet kill-switch setting (Enabled or Disabled) is displayed and preserved. Both are supported. IPv6 compatibility is checked independently. See [selected policy preservation](rpdb-lan-boundary.md).
 
 

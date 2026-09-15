@@ -26,13 +26,11 @@ public partial class MainWindow : Window
             $"SSH host: {address}\n\n{fingerprint}\n\nVerify this fingerprint with your router before trusting it. Trust this key for this session? A changed key will be rejected.",
             "Verify SSH host key", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes));
         DataContext = vm;
-        vm.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(vm.Page) && vm.Page is 10 or 11) NtfyPassword.Clear(); };
-        Closed += (_, _) => { RouterPassword.Clear(); NtfyPassword.Clear(); vm.Dispose(); };
+        Closed += (_, _) => { RouterPassword.Clear(); vm.Dispose(); };
     }
     // UI adapters only. Credentials pass to the session; discovery and commands live in services.
     private async void FindRouter(object sender, RoutedEventArgs e) { try { await vm.ConnectAsync(RouterPassword.Password, false); } finally { RouterPassword.Clear(); } }
     private async void TryRouter(object sender, RoutedEventArgs e) { try { await vm.ConnectAsync(RouterPassword.Password, true); } finally { RouterPassword.Clear(); } }
-    private void NtfyChanged(object sender, RoutedEventArgs e) { if (DataContext is WizardViewModel model) model.NtfyUrl = NtfyPassword.Password; }
     private void CopyReport(object sender, RoutedEventArgs e)
     { try { Clipboard.SetText(vm.Report); } catch { MessageBox.Show(this, "The clipboard is busy. Try again."); } }
     private void SaveReport(object sender, RoutedEventArgs e)

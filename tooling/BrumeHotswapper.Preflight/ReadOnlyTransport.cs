@@ -27,6 +27,7 @@ public sealed class ReadOnlyTransport(IRouterTransport inner) : IRouterTransport
         "if [ -z \"$(uci changes dhcp)\" ]; then echo false; else echo true; fi"];
     public static bool IsAllowed(string command)
     {
+        if (command == HotswapRuntime.ScanCommand || command == HotswapRuntime.PidCommand || command == RouterPrerequisites.CompletionCommand) return true;
         if (Exact.Contains(command)) return true;
         if (DeploymentPlanning.Paths.Any(p => BrumeHotswapper.Installer.Services.FileMetadata.Commands(p).Values.Contains(command))) return true;
         if (new[] { "wgclient1", "wgclient2", "wgclient3" }.Any(slot => command == SlotReferences(slot) || command == $"if ip link show {slot} >/dev/null 2>&1; then echo present; fi" || command == $"wg show {slot} latest-handshakes | awk '{{print $2}}'")) return true;

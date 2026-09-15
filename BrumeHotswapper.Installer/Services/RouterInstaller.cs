@@ -19,6 +19,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
     public async Task<InstallationResult> InstallAsync(InstallationPlan plan, IProgress<string> progress, CancellationToken ct)
     {
         var c = plan.Configuration;
+        await RouterPrerequisites.ArchiveCompletedAsync(router, ct);
         await RouterPrerequisites.EnsureNoTransactionAsync(router, ct);
         progress.Report("Validating router, VPN ownership and kill switch…");
         var fresh = await inspection.InspectAsync(c, ct);
@@ -90,7 +91,6 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                 changed.Add((before, after)); // Record before mutation, including cancellation races.
                 await router.ExecuteAsync($"{Unchanged(before)} && test ! -e {Q(path + ".hotswap-new")} && test ! -L {Q(path + ".hotswap-new")} && cp -p {Q(Stage + "/" + Path.GetFileName(path))} {Q(path + ".hotswap-new")} && mv -f {Q(path + ".hotswap-new")} {Q(path)}", ct);
             }
-            await router.UploadAsync(Stage + "/files-intent.json", JsonSerializer.Serialize(changed.Select(x => new { x.Before, x.After })), ct);
             step = "Reserve maintenance guard addresses"; progress.Report(step);
             foreach (var r in plan.Reservations.Where(r => r.Create))
             {
@@ -127,7 +127,8 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             step = "Validate installed runtime"; progress.Report(step);
             var checks = await ValidateAsync(plan, content, ct);
             committed = true; // Cleanup failure must not roll back a validated running installation.
-            await router.ExecuteAsync($"rm -rf {Stage} && rmdir /tmp/vpn-watch-installer-lock", ct);
+            await router.UploadAsync(Stage + "/completed", "installed", ct);
+            await router.ExecuteAsync(CleanupCommand(attempt), ct);
             return new(true, checks);
         }
         catch (Exception failure)
@@ -145,12 +146,10 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                 if (staged)
                 {
                     // Router config writers and the running engine do not share this transaction's lock.
-                    // Keep all evidence after these boundaries; never guess at reversing their effects.
-                    if (started || created.Count > 0)
-                    {
-                        if (started) await StopDaemonAsync(recovery.Token);
-                        throw new SafeFailure("Runtime or DHCP recovery requires inspection.");
-                    }
+                    // DHCP remains conservative; after startup, restore files only under the existing hash and policy checks.
+                    if (started) await StopDaemonAsync(recovery.Token);
+                    if (created.Count > 0)
+                        throw new SafeFailure("Committed DHCP recovery requires inspection.");
                     foreach (var item in changed.AsEnumerable().Reverse())
                     {
                         var b = item.Before;
@@ -182,9 +181,17 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                         await WriteCronAsync(DeploymentPlanning.RestoreOwnedCron(currentCron, sameRuntime ? fresh.Cron : ""), currentCron, recovery.Token);
                     }
                     if (runtimeStopped && fresh.WatchdogRunning && sameRuntime && rollbackOk)
+                    {
                         await router.ExecuteAsync("/root/vpn-watch-supervisor.sh --installer", recovery.Token);
+                        await new HotswapRuntime(router).WaitForOneAsync(recovery.Token);
+                        var restoredStatus = await router.ExecuteAsync("/root/vpn-watch.sh status", recovery.Token);
+                        if (!RuntimeValidation.ValidStatus(restoredStatus)) rollbackOk = false;
+                    }
                     if (!sameRuntime) rollbackOk = false;
-                    if (rollbackOk) await router.ExecuteAsync($"rm -rf {Stage} && rmdir /tmp/vpn-watch-installer-lock", recovery.Token);
+                    if (rollbackOk) {
+                        await router.UploadAsync(Stage + "/completed", "rolled-back", recovery.Token);
+                        await router.ExecuteAsync(CleanupCommand(attempt), recovery.Token);
+                    }
                 }
             }
             catch { rollbackOk = false; }
@@ -195,6 +202,9 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             throw new SafeFailure(message);
         }
     }
+    // A delayed command from an old session must never remove a newer transaction.
+    private static string CleanupCommand(string attempt) =>
+        $"test ! -L {Stage} && test \"$(cat {Stage}/owner)\" = {Q(attempt)} && rm -rf {Stage} && rmdir /tmp/vpn-watch-installer-lock";
     public static string ReservationSection(string mac) => "hotswap_" + mac.Replace(":", "").ToLowerInvariant();
     private static string Unchanged(FileState before) => before.Exists
         ? $"test ! -L {Q(before.Path)} && test \"$(sha256sum {Q(before.Path)} | awk '{{print $1}}')\" = {Q(before.Hash)} && {FileMetadata.MatchesCommand(before.Path, before.Mode)}"
@@ -205,56 +215,84 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
         await router.UploadAsync(Stage + "/cron", cron, ct);
         await router.ExecuteAsync($"(crontab -l 2>/dev/null || true) > {Stage}/cron.current; cmp -s {Stage}/cron.expected {Stage}/cron.current && crontab {Stage}/cron", ct);
     }
-    private async Task StopDaemonAsync(CancellationToken ct)
-    {
-        foreach (var pid in await inspection.DaemonPidsAsync(ct))
-            await router.ExecuteAsync($"if [ -r /proc/{pid}/cmdline ] && tr '\\000' '\\n' < /proc/{pid}/cmdline | grep -Fxq /root/vpn-watch.sh; then kill -TERM {pid}; fi", ct);
-        for (int i = 0; i < 20; i++)
-        { if ((await inspection.DaemonPidsAsync(ct)).Length == 0) return; await Task.Delay(500, ct); }
-        throw new SafeFailure("The existing watchdog did not stop safely. No force-kill was attempted.");
-    }
+    private Task StopDaemonAsync(CancellationToken ct) => new HotswapRuntime(router).StopAsync(ct);
     private async Task<IReadOnlyList<string>> ValidateAsync(InstallationPlan plan, Dictionary<string,string> content, CancellationToken ct)
     {
         var c = plan.Configuration;
-        foreach (var (path, body) in content)
-            await router.ExecuteAsync($"test -f {Q(path)} && {FileMetadata.MatchesCommand(path, path.EndsWith(".sh") ? "700" : "600")} && test \"$(sha256sum {Q(path)} | awk '{{print $1}}')\" = {Q(Hash(body))}", ct);
-        await router.ExecuteAsync("test \"$(grep -Fc '# vpn-watch GL reconciliation guard v1' /usr/bin/rtp2.sh)\" = 1 && sh -n /usr/bin/rtp2.sh && /root/install-vpn-watch-gl-guard.sh --check", ct);
-        var cron = await router.ExecuteAsync("crontab -l 2>/dev/null", ct);
-        if (CronPlanner.Generate(cron, c.Maintenance) != cron) throw new SafeFailure("The installed schedules differ from the reviewed plan.");
-        foreach (var r in plan.Reservations)
+        string operation = "installed files: integrity and permissions";
+        var warnings = new List<string>();
+        try
         {
-            var reservations = (await inspection.LanAsync(ct)).Reservations;
-            if (!reservations.Any(s => s.Mac.Equals(r.Mac, StringComparison.OrdinalIgnoreCase) && s.Ip == r.Ip))
-                throw new SafeFailure("A maintenance guard reservation failed validation.");
+            foreach (var (path, body) in content)
+            {
+                operation = "installed file " + path + ": integrity and permissions";
+                await router.ExecuteAsync($"test -f {Q(path)} && {FileMetadata.MatchesCommand(path, path.EndsWith(".sh") ? "700" : "600")} && test \"$(sha256sum {Q(path)} | awk '{{print $1}}')\" = {Q(Hash(body))}", ct);
+            }
+            operation = "GL reconciliation guard";
+            await router.ExecuteAsync("test \"$(grep -Fc '# vpn-watch GL reconciliation guard v1' /usr/bin/rtp2.sh)\" = 1 && sh -n /usr/bin/rtp2.sh && /root/install-vpn-watch-gl-guard.sh --check", ct);
+            operation = "owned cron entries";
+            var cron = await router.ExecuteAsync("crontab -l 2>/dev/null", ct);
+            if (CronPlanner.Generate(cron, c.Maintenance) != cron) throw new SafeFailure("The installed schedules differ from the reviewed plan.");
+            operation = "selected DHCP reservations";
+            var reservations = plan.Reservations.Count > 0 ? (await inspection.LanAsync(ct)).Reservations : [];
+            foreach (var r in plan.Reservations)
+            {
+                if (!reservations.Any(s => s.Mac.Equals(r.Mac, StringComparison.OrdinalIgnoreCase) && s.Ip == r.Ip))
+                    throw new SafeFailure("A maintenance guard reservation failed validation.");
+            }
+            operation = "ACTIVE/PRECOOKED/RECOVERY state";
+            string snapshot = "";
+            bool healthy = false;
+            for (int i = 0; i < 45; i++)
+            {
+                snapshot = await router.ExecuteAsync("if [ -f /tmp/vpn-watch/state ]; then cat /tmp/vpn-watch/state; fi", ct);
+                if (RuntimeValidation.IsHealthy(snapshot, c)) { healthy = true; break; }
+                await Task.Delay(2000, ct);
+            }
+            if (!healthy) throw new SafeFailure("The watchdog did not establish a healthy ACTIVE/PRECOOKED/RECOVERY topology in time.");
+            operation = "watchdog startup and PID lock";
+            await new HotswapRuntime(router).WaitForOneAsync(ct);
+            operation = "vpn-watch status command";
+            var status = await router.ExecuteAsync("/root/vpn-watch.sh status", ct);
+            if (!RuntimeValidation.ValidStatus(status)) throw new SafeFailure("Status output has no valid ACTIVE/PRECOOKED/RECOVERY structure.");
+            operation = "selected VPN policy agreement";
+            string policy = RouterInspection.Identifier(c.Profile.PolicySection);
+            await router.ExecuteAsync($"test \"$(uci -q get route_policy.{policy}.tunnel_id)\" = {Q(c.Profile.TunnelId)} && test \"$(uci -q get route_policy.{policy}.group_id)\" = {Q(c.Profile.GroupId)}", ct);
+            var runtime = snapshot.Split('\n').Where(l => l.Contains('=')).Select(l => l.Split('=', 2)).ToDictionary(v => v[0], v => v[1].Trim());
+            if ((await router.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim() != runtime["active_iface"] ||
+                (await router.ExecuteAsync($"uci -q get route_policy.{policy}.peer_id", ct)).Trim() != runtime["active_peer"])
+                throw new SafeFailure("The route policy and watchdog runtime disagree.");
+            operation = "WireGuard handshake observation";
+            foreach (var iface in new[] { runtime["active_iface"], runtime.GetValueOrDefault("standby_iface", "") }.Where(v => v.Length > 0))
+            {
+                try {
+                await router.ExecuteAsync($"wg show {iface} latest-handshakes | awk -v now=\"$(date +%s)\" '$2 > 0 && now-$2 <= 75 {{ok=1}} END {{exit !ok}}'", ct);
+                } catch(OperationCanceledException){throw;}
+                catch { warnings.Add("WARN: A WireGuard handshake observation was unavailable or older than the candidate-establishment threshold; established runtime health is checked by the watchdog."); }
+            }
+            operation = "configured VPN profile membership";
+            foreach (var peer in c.Tiers.Where(t => t.Tier > 0).SelectMany(t => t.Locations).SelectMany(g => g.Connections))
+                await router.ExecuteAsync($"test \"$(uci -q get wireguard.peer_{peer.PeerId}.group_id)\" = {Q(c.Profile.GroupId)} && grep -Fxq '{c.Profile.GroupId}_{peer.PeerId}' /etc/vpn_profiles.d/profile{c.Profile.TunnelId}", ct);
+            operation = "IPv6 prerequisite";
+            await Ipv6Compatibility.VerifyAsync(router, ct);
+            operation = "selected VPN routing and GL enforcement";
+            await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
+            // A real router-side delivery test is part of the explicitly enabled notification configuration.
+            operation = "notification delivery test";
+            if (c.Notifications) {
+                try { await router.ExecuteAsync("/root/vpn-watch.sh notify_test", ct); }
+                catch(OperationCanceledException){throw;}
+                catch { warnings.Add("WARN: Router notification test failed; installation remains valid. Check the topic or notification service."); }
+            }
+            return new List<string> { "VPN Watch: Running", CompatibilityCatalog.IsPatched(c.Router.Rtp2Hash) ? "GL Guard: Already installed" : "GL Guard: Installed", "VPN ACTIVE: Verified (standby availability may vary)", "Supervisor and schedules: Verified",
+                c.Notifications ? "Notifications: Enabled (see delivery warnings, if any)" : "Notifications: Disabled",
+                c.Maintenance ? "Maintenance: Enabled" : "Maintenance: Disabled" }.Concat(warnings).ToArray();
         }
-        string snapshot = "";
-        bool healthy = false;
-        for (int i = 0; i < 45; i++)
+        catch (OperationCanceledException) { throw; }
+        catch (Exception failure)
         {
-            snapshot = await router.ExecuteAsync("if [ -f /tmp/vpn-watch/state ]; then cat /tmp/vpn-watch/state; fi", ct);
-            if (RuntimeValidation.IsHealthy(snapshot, c)) { healthy = true; break; }
-            await Task.Delay(2000, ct);
+            string detail = failure is SafeFailure safe ? safe.Message : failure is TimeoutException ? "Timed out; output withheld." : "Transport/read failure; output withheld.";
+            throw new SafeFailure($"Post-install validation failed: {operation}. {detail}");
         }
-        if (!healthy) throw new SafeFailure("The watchdog did not establish a healthy ACTIVE/PRECOOKED/RECOVERY topology in time.");
-        if ((await inspection.DaemonPidsAsync(ct)).Length != 1) throw new SafeFailure("Expected exactly one watchdog daemon.");
-        await router.ExecuteAsync("/root/vpn-watch-supervisor.sh --installer", ct);
-        if ((await inspection.DaemonPidsAsync(ct)).Length != 1) throw new SafeFailure("Supervisor validation failed.");
-        string policy = RouterInspection.Identifier(c.Profile.PolicySection);
-        await router.ExecuteAsync($"test \"$(uci -q get route_policy.{policy}.tunnel_id)\" = {Q(c.Profile.TunnelId)} && test \"$(uci -q get route_policy.{policy}.group_id)\" = {Q(c.Profile.GroupId)}", ct);
-        var runtime = snapshot.Split('\n').Where(l => l.Contains('=')).Select(l => l.Split('=', 2)).ToDictionary(v => v[0], v => v[1].Trim());
-        if ((await router.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim() != runtime["active_iface"] ||
-            (await router.ExecuteAsync($"uci -q get route_policy.{policy}.peer_id", ct)).Trim() != runtime["active_peer"])
-            throw new SafeFailure("The route policy and watchdog runtime disagree.");
-        foreach (var iface in new[] { runtime["active_iface"], runtime.GetValueOrDefault("standby_iface", "") }.Where(v => v.Length > 0))
-            await router.ExecuteAsync($"wg show {iface} latest-handshakes | awk -v now=\"$(date +%s)\" '$2 > 0 && now-$2 <= 75 {{ok=1}} END {{exit !ok}}'", ct);
-        foreach (var peer in c.Tiers.Where(t => t.Tier > 0).SelectMany(t => t.Locations).SelectMany(g => g.Connections))
-            await router.ExecuteAsync($"test \"$(uci -q get wireguard.peer_{peer.PeerId}.group_id)\" = {Q(c.Profile.GroupId)} && grep -Fxq '{c.Profile.GroupId}_{peer.PeerId}' /etc/vpn_profiles.d/profile{c.Profile.TunnelId}", ct);
-        await Ipv6Compatibility.VerifyAsync(router, ct);
-        await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
-        // A real router-side delivery test is part of the explicitly enabled notification configuration.
-        if (c.Notifications) await router.ExecuteAsync("/root/vpn-watch.sh notify_test", ct);
-        return ["VPN Watch: Running", CompatibilityCatalog.IsPatched(c.Router.Rtp2Hash) ? "GL Guard: Already installed" : "GL Guard: Installed", "VPN ACTIVE: Verified (standby availability may vary)", "Supervisor and schedules: Verified",
-            c.Notifications ? "Notifications: Enabled and tested" : "Notifications: Disabled",
-            c.Maintenance ? "Maintenance: Enabled" : "Maintenance: Disabled"];
     }
 }

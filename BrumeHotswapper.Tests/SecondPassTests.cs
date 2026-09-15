@@ -110,7 +110,7 @@ public class SecondPassTests
     }
     [Fact] public async Task PrivateUrlNeverAppearsInPlanOrStatus()
     {
-        var c=Config() with {Notifications=true,NtfyUrl="https://example.invalid/synthetic-test-topic"};
+        var c=Config() with {Notifications=true,NtfyUrl="https://ntfy.sh/synthetic-test-topic"};
         var fake=new RouterFixture(); var installer=new RouterInstaller(fake,new VerifiedKillSwitch());
         var plan=await installer.PlanAsync(c,CancellationToken.None);
         Assert.DoesNotContain(c.NtfyUrl,plan.ToString()); Assert.DoesNotContain(c.NtfyUrl,c.ToString());
@@ -127,6 +127,7 @@ public class SecondPassTests
         public Dictionary<string,string> Uploads {get;}=[];
         public Dictionary<string,string> Installed {get;}=[];
         public string FirmwareHash=CompatibilityCatalog.StockHash;
+        public Dictionary<string,string> Backups {get;}=[];
         public string Cron="";
         public bool Running,RejectPatch;
         public int RealPatches;
@@ -164,9 +165,24 @@ public class SecondPassTests
             else if(cmd=="uci -q get wireguard.peer_11.location") result="Germany,Frankfurt";
             else if(cmd.StartsWith("uci -q show route_policy")) result="vpn";
             else if(cmd.StartsWith("grep -Fc '# vpn-watch")) result=CompatibilityCatalog.IsPatched(FirmwareHash)?"1":"0";
-            else if(cmd.StartsWith("for f in /proc/")) result=Running?"123":"";
+            else if(cmd==HotswapRuntime.ScanCommand) result=Running?"123 1 daemon":"";
+            else if(cmd==HotswapRuntime.PidCommand) result=Running?"123":"";
             else if(cmd.StartsWith("crontab -l")) result=Cron;
             else if(cmd.Contains("&& crontab /root/")) Cron=Uploads["/root/.hotswap-installer/transaction/cron"];
+            else if(cmd.StartsWith("set -e; test ! -L '/root/.hotswap-installer/backups/"))
+            {
+                var match=Regex.Match(cmd,@"sha256sum '([^']+)'");
+                var path=match.Groups[1].Value;
+                if(Installed.TryGetValue(path,out var original)) Backups[Hash(original)]=original;
+            }
+            else if(cmd.Contains(".hotswap-restore"))
+            {
+                var match=Regex.Match(cmd,@"cp '/root/.hotswap-installer/backups/([^']+)' '([^']+)\.hotswap-restore'");
+                if(match.Success) {
+                    if(match.Groups[2].Value=="/usr/bin/rtp2.sh") FirmwareHash=match.Groups[1].Value;
+                    else Installed[match.Groups[2].Value]=Backups[match.Groups[1].Value];
+                }
+            }
             else if(cmd.Contains("cp -p '/root/.hotswap-installer/transaction/"))
             {
                 var match=Regex.Match(cmd,@"cp -p '([^']+)' '([^']+)\.hotswap-new'");
@@ -176,6 +192,7 @@ public class SecondPassTests
             { if(RejectPatch)throw new SafeFailure("The GL reconciliation guard rejected this firmware."); FirmwareHash=CompatibilityCatalog.PatchedHash;RealPatches++; }
             else if(cmd.Contains("/root/vpn-watch-supervisor.sh --installer")) Running=true;
             else if(cmd.Contains("kill -TERM ")) Running=false;
+            else if(cmd=="/root/vpn-watch.sh status") result="ACTIVE: wgclient1 peer=11 tier=1\nPRECOOKED: none\nRECOVERY: wgclient2\n";
             else if(cmd.StartsWith("if [ -f /tmp/vpn-watch/state"))
                 result="active_iface=wgclient1\nactive_peer=11\nactive_rank=1\nactive_tier=1\nstandby_iface=\nstandby_peer=\nrecovery_iface=wgclient2\n";
             else if(cmd.StartsWith("if [ -f '"))

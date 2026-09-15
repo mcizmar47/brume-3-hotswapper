@@ -209,12 +209,8 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         var cron = await router.ExecuteAsync("crontab -l 2>/dev/null || true", ct);
         _ = CronPlanner.Generate(cron, c.Maintenance);
         var pids = await DaemonPidsAsync(ct);
-        if (pids.Length > 1) throw new SafeFailure("Multiple Hotswapper daemons are running. Stop the duplicates before installation.");
-        return new(live, c.Profile.PolicySection, active, activePeer, cron, (c.Guards.Count > 0 ? await LanAsync(ct) : new LanInventory(new("0.0.0.0", "0.0.0.0", 0, 0), [], [])), files, pids.Length == 1, killSwitchEnabled);
+        return new(live, c.Profile.PolicySection, active, activePeer, cron, (c.Guards.Count > 0 ? await LanAsync(ct) : new LanInventory(new("0.0.0.0", "0.0.0.0", 0, 0), [], [])), files, pids.Length > 0, killSwitchEnabled);
     }
-    public async Task<string[]> DaemonPidsAsync(CancellationToken ct)
-    {
-        var output = await router.ExecuteAsync("for f in /proc/[0-9]*/cmdline; do [ -r \"$f\" ] || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq '/root/vpn-watch.sh' || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq daemon || continue; basename \"$(dirname \"$f\")\"; done", ct);
-        return output.Split('\n', StringSplitOptions.RemoveEmptyEntries).Where(p => Regex.IsMatch(p, "^[0-9]+$")).ToArray();
-    }
+    public async Task<string[]> DaemonPidsAsync(CancellationToken ct) =>
+        (await new HotswapRuntime(router).ReadAsync(ct)).Where(p=>p.Kind=="daemon").Select(p=>p.Pid).ToArray();
 }

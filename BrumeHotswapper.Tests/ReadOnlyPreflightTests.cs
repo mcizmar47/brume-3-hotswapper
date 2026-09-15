@@ -47,7 +47,7 @@ public class ReadOnlyPreflightTests
             "if [ -r /tmp/dhcp.leases ]; then cat /tmp/dhcp.leases; fi" => "",
             "ip -4 neigh show" => "",
             "ip -o -4 addr show | awk '{print $4}'" => "192.0.2.1/24",
-            var x when x == ReadOnlyTransport.Daemons => "123",
+            var x when x == HotswapRuntime.ScanCommand => "123 1 daemon",
             "uci -q get route_policy.'@rule[0]'.killswitch || true" => "1",
             "uci -q get route_policy.'@rule[0]'.enabled || true" => "1",
             "uci -q get glipv6.globals.enabled || true" => "0",

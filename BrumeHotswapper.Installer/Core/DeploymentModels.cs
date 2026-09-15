@@ -54,6 +54,10 @@ public static class DeploymentPlanning
 }
 public static class RuntimeValidation
 {
+    public static bool ValidStatus(string output) =>
+        System.Text.RegularExpressions.Regex.IsMatch(output, @"(?m)^ACTIVE:\s+wgclient[123] peer=[0-9]+(?: |$)") &&
+        System.Text.RegularExpressions.Regex.IsMatch(output, @"(?m)^PRECOOKED:\s+.+$") &&
+        System.Text.RegularExpressions.Regex.IsMatch(output, @"(?m)^RECOVERY:\s+wgclient[123]\s*$");
     public static bool IsHealthy(string snapshot, InstallerConfiguration c)
     {
         var rows = snapshot.Split('\n').Where(l => l.Contains('=')).Select(l => l.Split('=', 2)).ToArray();

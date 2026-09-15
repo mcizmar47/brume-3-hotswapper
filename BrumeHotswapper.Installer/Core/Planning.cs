@@ -48,8 +48,7 @@ public static class ConfigurationGenerator
             foreach (var p in g.Connections)
                 if (!Regex.IsMatch(p.PeerId, "^[0-9]+$") || !seen.Add(p.PeerId) || !c.Profile.Connections.Contains(p)) throw new SafeFailure("Invalid or duplicate VPN pool membership.");
         }
-        if (c.Notifications && (!Uri.TryCreate(c.NtfyUrl, UriKind.Absolute, out var url) || url.Scheme != "https" || !string.IsNullOrEmpty(url.UserInfo)
-            || c.NtfyUrl.Any(char.IsControl))) throw new SafeFailure("Use an HTTPS ntfy topic URL without embedded credentials.");
+        if (c.Notifications) _ = NtfyTopic.Normalize(c.NtfyUrl);
         foreach (var d in c.Guards) ValidateDevice(d.Mac, d.Ip);
     }
     public static void ValidateDevice(string mac, string ip)
@@ -67,7 +66,7 @@ public static class ConfigurationGenerator
         return result.ToString().Replace("\r\n", "\n");
     }
     public static string PrivateConfig(InstallerConfiguration c)
-    { Validate(c); return $"TUNNEL_ID={Quote(c.Profile.TunnelId)}\nGROUP_ID={Quote(c.Profile.GroupId)}\nNTFY_URL={Quote(c.Notifications ? c.NtfyUrl : "")}\n"; }
+    { Validate(c); return $"TUNNEL_ID={Quote(c.Profile.TunnelId)}\nGROUP_ID={Quote(c.Profile.GroupId)}\nNTFY_URL={Quote(c.Notifications ? NtfyTopic.Normalize(c.NtfyUrl) : "")}\n"; }
     public static string Guards(InstallerConfiguration c) => string.Join("", c.Guards.Select(d => $"{d.Mac.ToLowerInvariant()}\t{d.Ip}\n"));
 }
 public static class CronPlanner

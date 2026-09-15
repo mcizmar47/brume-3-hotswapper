@@ -95,15 +95,15 @@ public class ArchiveReconciliationTests
         Assert.True(fired); Assert.Contains("rolled back", error.Message);
         Assert.DoesNotContain("synthetic-secret", error.Message); Assert.Empty(fake.Installed);
     }
-    [Fact] public async Task StartedRuntimeFailureRetainsFilesAndJournal()
+    [Fact] public async Task StartedRuntimeFailureRestoresFilesWhenPolicyUnchanged()
     {
         var fake = new RouterFixture(); var router = new Intercept(fake);
         var installer = new RouterInstaller(router, new VerifiedKillSwitch());
         var plan = await installer.PlanAsync(Config(), default);
         router.After = cmd => { if (cmd.StartsWith("rm -f /tmp/vpn-watch/state")) throw new IOException("synthetic-secret"); };
         var error = await Assert.ThrowsAsync<SafeFailure>(() => installer.InstallAsync(plan, new Progress<string>(), default));
-        Assert.Contains("Recovery needs attention", error.Message); Assert.Equal(7, fake.Installed.Count);
-        Assert.DoesNotContain(router.Commands, c => c.StartsWith("rm -rf"));
+        Assert.Contains("rolled back", error.Message); Assert.Empty(fake.Installed);
+        Assert.Contains(router.Commands, c => c.Contains("rm -rf /root/.hotswap-installer/transaction"));
         Assert.False(fake.Running); Assert.DoesNotContain("synthetic-secret", error.Message);
     }
     [Fact] public async Task CleanupFailureDoesNotUndoValidatedInstallation()
@@ -111,7 +111,7 @@ public class ArchiveReconciliationTests
         var fake = new RouterFixture(); var router = new Intercept(fake);
         var installer = new RouterInstaller(router, new VerifiedKillSwitch());
         var plan = await installer.PlanAsync(Config(), default);
-        router.Before = cmd => { if (cmd.StartsWith("rm -rf")) throw new IOException(); };
+        router.Before = cmd => { if (cmd.Contains("rm -rf /root/.hotswap-installer/transaction")) throw new IOException(); };
         var error = await Assert.ThrowsAsync<SafeFailure>(() => installer.InstallAsync(plan, new Progress<string>(), default));
         Assert.Contains("validation succeeded", error.Message); Assert.True(fake.Running); Assert.Equal(7, fake.Installed.Count);
     }
@@ -174,7 +174,7 @@ public class ArchiveReconciliationTests
         router.After = cmd => { if (cmd.Contains(boundary)) throw new IOException(); };
         var error = await Assert.ThrowsAsync<SafeFailure>(() => installer.InstallAsync(plan, new Progress<string>(), default));
         Assert.Contains("Recovery needs attention", error.Message);
-        Assert.DoesNotContain(router.Commands, cmd => cmd.Contains("uci delete") || cmd.StartsWith("rm -rf"));
+        Assert.DoesNotContain(router.Commands, cmd => cmd.Contains("uci delete") || cmd.Contains("rm -rf /root/.hotswap-installer/transaction"));
         Assert.Contains(fake.Uploads.Keys, k => k.EndsWith("journal.json"));
     }
     [Fact] public void HistoricalPatchHashRetainsVariantIdentity()

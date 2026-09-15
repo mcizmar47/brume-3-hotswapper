@@ -53,3 +53,6 @@ public record InstallerConfiguration(RouterIdentity Router, VpnProfile Profile, 
 public record InstallationStep(string Name, bool ChangesRouter);
 public record InstallationResult(bool Success, IReadOnlyList<string> Checks);
 public class SafeFailure(string message) : Exception(message);
+
+public sealed class RouterCommandFailure(int? exitStatus) : SafeFailure($"Router command returned exit status {exitStatus?.ToString() ?? "unknown"}; output withheld.")
+{ public int? ExitStatus { get; } = exitStatus; }

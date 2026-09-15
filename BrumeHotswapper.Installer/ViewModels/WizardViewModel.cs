@@ -84,10 +84,12 @@ public sealed class WizardViewModel : Observable, IDisposable
             session ??= Demo ? new DemoRouterSession() : new SshRouterSession(trust);
             if (!Demo && string.IsNullOrEmpty(password)) throw new SafeFailure("Enter the router administrator password.");
             var candidates = Demo ? new[] { "192.0.2.1" } : manual ? new[] { ManualAddress.Trim() } : RouterDiscovery.Candidates();
+            int authenticationAttempts = 0;
             foreach (var address in candidates)
             {
                 ct.ThrowIfCancellationRequested(); Status = $"Checking {address}…";
                 if (!Demo && !await RouterDiscovery.HasSshAsync(address, ct)) continue;
+                if (++authenticationAttempts > 4) break;
                 try
                 {
                     Router = await session.ConnectAsync(address, password, ct);
@@ -96,7 +98,7 @@ public sealed class WizardViewModel : Observable, IDisposable
                 catch (SafeFailure) { if (manual) throw; }
             }
             if (Router != null) { Page = 2; Status = "No supported Brume found."; }
-            else throw new SafeFailure("No Brume found among local gateways. Use the manual IPv4 address fallback; check SSH access and password.");
+            else throw new SafeFailure("No Brume found among local gateways and subnet edge addresses. Use the manual IPv4 address fallback; check SSH access and password.");
         });
     }
     private void ResetConnection()
