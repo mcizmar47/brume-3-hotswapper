@@ -14,13 +14,12 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
     private static string Hash(string content) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
     private static string Q(string s) => ConfigurationGenerator.Quote(s);
     public async Task<InstallationPlan> PlanAsync(InstallerConfiguration c, CancellationToken ct) =>
-        DeploymentPlanning.Create(c, await inspection.InspectAsync(c, ct, enforceKillSwitch: false));
+        DeploymentPlanning.Create(c, await inspection.InspectAsync(c, ct));
 
     public async Task<InstallationResult> InstallAsync(InstallationPlan plan, IProgress<string> progress, CancellationToken ct)
     {
         var c = plan.Configuration;
-        if ((await router.ExecuteAsync($"if [ -e {Stage} ] || [ -d /tmp/vpn-watch-installer-lock ]; then echo pending; fi", ct)).Trim() == "pending")
-            throw new SafeFailure("Another installation is active or has an unfinished recovery journal at /root/.hotswap-installer/transaction. Inspect that transaction before retrying.");
+        await RouterPrerequisites.EnsureNoTransactionAsync(router, ct);
         progress.Report("Validating router, VPN ownership and kill switch…");
         var fresh = await inspection.InspectAsync(c, ct);
         var refreshed = DeploymentPlanning.Create(c, fresh);
@@ -162,7 +161,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                         if (!b.Exists && current.Length == 0) continue;
                         if (current == b.Hash)
                         {
-                            var mode = (await router.ExecuteAsync($"stat -c %a {Q(b.Path)}", recovery.Token)).Trim();
+                            var mode = FileMetadata.ParseListing(await router.ExecuteAsync(FileMetadata.ListingCommand(b.Path), recovery.Token)).Mode;
                             if (mode == b.Mode) continue;
                             rollbackOk = false; // A metadata-only concurrent edit has no provable owner.
                             continue;
@@ -198,7 +197,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
     }
     public static string ReservationSection(string mac) => "hotswap_" + mac.Replace(":", "").ToLowerInvariant();
     private static string Unchanged(FileState before) => before.Exists
-        ? $"test ! -L {Q(before.Path)} && test \"$(sha256sum {Q(before.Path)} | awk '{{print $1}}')\" = {Q(before.Hash)} && test \"$(stat -c %a {Q(before.Path)})\" = {Q(before.Mode)}"
+        ? $"test ! -L {Q(before.Path)} && test \"$(sha256sum {Q(before.Path)} | awk '{{print $1}}')\" = {Q(before.Hash)} && {FileMetadata.MatchesCommand(before.Path, before.Mode)}"
         : $"test ! -e {Q(before.Path)} && test ! -L {Q(before.Path)}";
     private async Task WriteCronAsync(string cron, string expected, CancellationToken ct)
     {
@@ -218,7 +217,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
     {
         var c = plan.Configuration;
         foreach (var (path, body) in content)
-            await router.ExecuteAsync($"test -f {Q(path)} && test \"$(stat -c %a {Q(path)})\" = {(path.EndsWith(".sh") ? "700" : "600")} && test \"$(sha256sum {Q(path)} | awk '{{print $1}}')\" = {Q(Hash(body))}", ct);
+            await router.ExecuteAsync($"test -f {Q(path)} && {FileMetadata.MatchesCommand(path, path.EndsWith(".sh") ? "700" : "600")} && test \"$(sha256sum {Q(path)} | awk '{{print $1}}')\" = {Q(Hash(body))}", ct);
         await router.ExecuteAsync("test \"$(grep -Fc '# vpn-watch GL reconciliation guard v1' /usr/bin/rtp2.sh)\" = 1 && sh -n /usr/bin/rtp2.sh && /root/install-vpn-watch-gl-guard.sh --check", ct);
         var cron = await router.ExecuteAsync("crontab -l 2>/dev/null", ct);
         if (CronPlanner.Generate(cron, c.Maintenance) != cron) throw new SafeFailure("The installed schedules differ from the reviewed plan.");

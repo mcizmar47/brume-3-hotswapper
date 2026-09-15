@@ -4,7 +4,7 @@ namespace BrumeHotswapper.Installer.Services;
 public sealed class VpnDiscovery(IRouterTransport router)
 {
     public static VpnProfile? AutoSelect(IReadOnlyList<VpnProfile> profiles) => profiles.Count == 1 ? profiles[0] : null;
-    public async Task<IReadOnlyList<VpnProfile>> DiscoverAsync(CancellationToken ct)
+    public async Task<IReadOnlyList<VpnProfile>> DiscoverPoliciesAsync(CancellationToken ct)
     {
         // Never export wireguard config. Only route-policy IDs, profile peer IDs, name and location are read.
         var policies = await router.ExecuteAsync("uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.tunnel_id='\\([0-9]*\\)'$/\\1 \\2/p\"", ct);
@@ -17,7 +17,17 @@ public sealed class VpnDiscovery(IRouterTransport router)
             // Firmware process policies have tunnel IDs but no provider group; skip them.
             var group = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.group_id || true", ct)).Trim();
             if (!Regex.IsMatch(group, "^[0-9]+$")) continue;
-            var peers = await router.ExecuteAsync($"if [ -f /etc/vpn_profiles.d/profile{fields[1]} ]; then sed -n 's/^{group}_\\([0-9][0-9]*\\)$/peer_\\1/p' /etc/vpn_profiles.d/profile{fields[1]}; fi", ct);
+            profiles.Add(new(fields[1],group,[],fields[0]));
+        }
+        return profiles;
+    }
+    public async Task<IReadOnlyList<VpnProfile>> DiscoverAsync(CancellationToken ct)
+    {
+        var profiles = new List<VpnProfile>();
+        foreach (var profile in await DiscoverPoliciesAsync(ct))
+        {
+            var group = profile.GroupId;
+            var peers = await router.ExecuteAsync($"if [ -f /etc/vpn_profiles.d/profile{profile.TunnelId} ]; then sed -n 's/^{group}_\\([0-9][0-9]*\\)$/peer_\\1/p' /etc/vpn_profiles.d/profile{profile.TunnelId}; fi", ct);
             var connections = new List<VpnConnection>();
             foreach (var peer in peers.Split('\n').Select(s => s.Trim()).Where(s => Regex.IsMatch(s, "^peer_[0-9]+$")).Distinct())
             {
@@ -27,7 +37,7 @@ public sealed class VpnDiscovery(IRouterTransport router)
                 var location = (await router.ExecuteAsync($"uci -q get wireguard.{peer}.location || true", ct)).Trim();
                 connections.Add(new(peer[5..], name, location));
             }
-            if (connections.Count > 0) profiles.Add(new(fields[1], group, connections, fields[0]));
+            if (connections.Count > 0) profiles.Add(new(profile.TunnelId, group, connections, profile.PolicySection));
         }
         return profiles;
     }

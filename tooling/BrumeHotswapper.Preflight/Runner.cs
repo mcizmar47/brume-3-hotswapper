@@ -10,10 +10,9 @@ using BrumeHotswapper.Installer.Services;
 namespace BrumeHotswapper.Preflight;
 
 public record Check(string Name, string Status, string Detail);
-public sealed partial class Runner(SshRouterSession session, string repository, string archive, string shell, Action<Check> report)
+public sealed partial class Runner(SshRouterSession session, Action<Check> report)
 {
     private readonly ReadOnlyTransport read = new(session);
-    private static string Hash(byte[] b) => Convert.ToHexString(SHA256.HashData(b)).ToLowerInvariant();
     private void Add(string name, bool pass, string detail) => report(new(name, pass ? "PASS" : "BLOCK", detail));
     private async Task Step(string name, Func<Task> action)
     {
@@ -69,7 +68,7 @@ public sealed partial class Runner(SshRouterSession session, string repository, 
         foreach (string path in DeploymentPlanning.Paths)
             await Step("File " + path, async () =>
             {
-                foreach (var check in MetadataReview.Evaluate(path, string.Join("\n", (await FileMetadata.ReadAsync(read, path, ct)).Select(f => f.Key + "=" + f.Value)))) report(check);
+                foreach (var check in MetadataReview.Evaluate(path, await FileMetadata.ReadAsync(read, path, ct))) report(check);
             });
         await Step("DHCP/LAN", async () =>
         {
@@ -81,32 +80,10 @@ public sealed partial class Runner(SshRouterSession session, string repository, 
         });
         await Step("Pending DHCP edits", async () => { var value = (await read.ExecuteAsync("if [ -z \"$(uci changes dhcp)\" ]; then echo false; else echo true; fi", ct)).Trim(); Add("Pending DHCP edits", value == "false", "Pending changes: " + (value == "false" ? "false" : "true") + "."); });
     }
-    private async Task SlotsAsync(VpnProfile profile, CancellationToken ct)
+    private async Task SlotsAsync(VpnProfile profile,CancellationToken ct)
     {
-        string policy = RouterInspection.Identifier(profile.PolicySection);
-        var active = (await read.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim();
-        var peer = (await read.ExecuteAsync($"uci -q get route_policy.{policy}.peer_id", ct)).Trim();
-        int generated = 0;
-        bool valid = new[] { "wgclient1", "wgclient2", "wgclient3" }.Contains(active);
-        foreach (var slot in new[] { "wgclient1", "wgclient2", "wgclient3" })
-        {
-            var references = (await read.ExecuteAsync(ReadOnlyTransport.SlotReferences(slot), ct)).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            foreach (var other in references.Where(x => x != profile.PolicySection))
-            {
-                bool firmware = other == "gl_process_vpn" && slot == active &&
-                    (await read.ExecuteAsync("uci -q get route_policy.gl_process_vpn", ct)).Trim() == "rule_process" &&
-                    (await read.ExecuteAsync("uci -q get route_policy.gl_process_vpn.group_id || true", ct)).Trim() == "";
-                if (firmware) generated++; else valid = false;
-            }
-            var config = (await read.ExecuteAsync($"uci -q get network.{slot}.config || true", ct)).Trim();
-            if (config.Length == 0)
-            { if ((await read.ExecuteAsync($"if ip link show {slot} >/dev/null 2>&1; then echo present; fi", ct)).Trim() == "present") valid = false; }
-            else if (Regex.IsMatch(config, "^peer_[0-9]+$"))
-                valid &= (await read.ExecuteAsync($"uci -q get wireguard.{config}.group_id", ct)).Trim() == profile.GroupId;
-            else valid = false;
-            if (slot == active) valid &= config == "peer_" + peer;
-        }
-        Add("Slot ownership", valid, $"Inspected all three reserved slots, active peer/interface agreement and policy references; {generated} verified firmware process reference(s). Identifiers withheld.");
+        await new RouterInspection(read,new KillSwitchVerifier()).VerifyPolicySlotsAsync(profile,ct);
+        Add("Slot ownership",true,"Shared production slot prerequisites passed.");
     }
     private async Task StateAsync(RouterIdentity identity, VpnProfile profile, CancellationToken ct)
     {
@@ -135,48 +112,5 @@ public sealed partial class Runner(SshRouterSession session, string repository, 
         }
         var config = new InstallerConfiguration(identity, profile, tiers, false, "", false, []);
         Add("RuntimeValidation", RuntimeValidation.IsHealthy(snapshot, config), "Executed the real RuntimeValidation against the live snapshot and installed rank membership.");
-    }
-    private async Task FirmwareAsync(RouterIdentity identity, CancellationToken ct)
-    {
-        var bytes = await session.ReadFirmwareBytesAsync(ct);
-        if (Hash(bytes) != identity.Rtp2Hash) { Array.Clear(bytes); throw new SafeFailure("Firmware SHA changed or raw transfer differed; comparison stopped."); }
-        Add("Firmware transfer integrity", Hash(bytes) == identity.Rtp2Hash, "Live SHA-256: " + Hash(bytes) + "; bytes: " + bytes.Length + ". Raw SSH stdout bytes retained only in memory.");
-        using var zip = ZipFile.OpenRead(Path.Combine(archive, "brume_dump.zip"));
-        using var input = zip.GetEntry("brume_dump/bin/rtp2.sh")!.Open(); using var buffer = new MemoryStream(); await input.CopyToAsync(buffer, ct); var stock = buffer.ToArray();
-        if (Hash(stock) != CompatibilityCatalog.StockHash) throw new SafeFailure("Local stock evidence hash changed.");
-        string patcher = (await File.ReadAllTextAsync(Path.Combine(repository, "firmware/install-vpn-watch-gl-guard.sh"), ct)).Replace("\r\n", "\n");
-        int start = patcher.IndexOf("    awk -v anchor=", StringComparison.Ordinal), end = patcher.IndexOf(" > \"$tmp\" || {", StringComparison.Ordinal);
-        string code = patcher[start..end]; if (!code.EndsWith(" \"$TARGET\"")) throw new SafeFailure("Local generator shape changed."); code = code[..^10];
-        var psi = new ProcessStartInfo(shell) { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
-        psi.ArgumentList.Add("-c"); psi.ArgumentList.Add("ANCHOR='cmd=\"$1\";shift'\n" + code); psi.Environment["PATH"] = Path.GetDirectoryName(shell) + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH");
-        using var process = Process.Start(psi)!; using var generated = new MemoryStream();
-        var outputTask = process.StandardOutput.BaseStream.CopyToAsync(generated, ct); var errorTask = process.StandardError.ReadToEndAsync(ct);
-        await process.StandardInput.BaseStream.WriteAsync(stock, ct); process.StandardInput.Close(); await Task.WhenAll(outputTask, process.WaitForExitAsync(ct)); await errorTask;
-        var expected = generated.ToArray(); if (process.ExitCode != 0 || Hash(expected) != CompatibilityCatalog.PatchedHash) throw new SafeFailure("Local guard reproduction failed.");
-        var anchorBytes = Encoding.UTF8.GetBytes("cmd=\"$1\";shift\n"); int insertion = stock.AsSpan().IndexOf(anchorBytes) + anchorBytes.Length;
-        int extra = bytes.Length - stock.Length;
-        bool preserved = extra >= 0 && bytes.AsSpan(0, insertion).SequenceEqual(stock.AsSpan(0, insertion)) && bytes.AsSpan(insertion + extra).SequenceEqual(stock.AsSpan(insertion));
-        Add("Firmware stock preservation", preserved, preserved ? $"Every original stock byte is preserved; the only insertion is {extra} bytes after dispatch." : "Live differences extend beyond a single guard insertion; do not whitelist.");
-        if (preserved)
-        {
-            var actualGuard = Encoding.UTF8.GetString(bytes.AsSpan(insertion, extra));
-            var expectedGuard = Encoding.UTF8.GetString(expected.AsSpan(insertion, expected.Length-stock.Length));
-            bool historical = Hash(bytes) == CompatibilityCatalog.HistoricalPatchedHash && actualGuard == expectedGuard.Replace("args=%s\n", "args=%s\\n");
-            bool equal = actualGuard == expectedGuard || historical;
-            bool whitespace = Regex.Replace(actualGuard, @"\s", "") == Regex.Replace(expectedGuard, @"\s", "");
-            report(new("Guard comparison", equal ? "PASS" : "WARN", equal ? historical ? "Verified historical printf newline encoding; exact reproduced historical hash." : "Live guard exactly equals reproducible guard." : $"Guard differs; whitespace-only: {whitespace}; expected bytes: {Encoding.UTF8.GetByteCount(expectedGuard)}; actual bytes: {extra}."));
-            var knownLines = expectedGuard.Split('\n'); var liveLines = actualGuard.Split('\n');
-            int missing = knownLines.Count(x => !liveLines.Contains(x)), added = liveLines.Count(x => !knownLines.Contains(x));
-            report(new("Guard diff summary", equal ? "PASS" : "WARN", $"Missing/changed expected lines: {missing}; added/changed live lines: {added}. Non-guard proprietary contents withheld."));
-            // Emit only differences that are demonstrably whitespace changes to known guard lines.
-            foreach (var line in liveLines.Where(x => !equal && !knownLines.Contains(x)))
-            {
-                var known = knownLines.FirstOrDefault(x => Regex.Replace(x, @"\s", "") == Regex.Replace(line, @"\s", ""));
-                if (known != null) report(new("Guard formatting difference", "WARN", "Known guard line " + Array.IndexOf(knownLines, known) + ": leading whitespace " + (known.Length-known.TrimStart().Length) + " -> " + (line.Length-line.TrimStart().Length) + "; CR present: " + line.Contains('\r') + "."));
-                else report(new("Guard semantic difference", "WARN", "Unmatched guard line withheld; length " + line.Length + ", SHA-256 " + Hash(Encoding.UTF8.GetBytes(line)) + "."));
-            }
-        }
-        Add("Compatibility classification", CompatibilityCatalog.IsPatched(Hash(bytes)), "Current catalog: " + CompatibilityCatalog.Classify(Hash(bytes)) + ". No catalog changes are made by preflight.");
-        Array.Clear(bytes); Array.Clear(stock); Array.Clear(expected);
     }
 }

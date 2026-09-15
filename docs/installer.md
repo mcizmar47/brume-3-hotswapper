@@ -2,7 +2,7 @@
 
 ## Operation
 
-Open BrumeHotswapper.slnx from the repository root. Projects and bundled RouterAssets use relative paths. Normal startup uses real discovery; demo data requires --demo. A reviewed plan is revalidated before mutation. Unknown unmarked firmware requires acknowledgement; unknown existing patches are refused.
+Open BrumeHotswapper.slnx from the repository root. Projects and bundled RouterAssets use relative paths. Normal startup uses real discovery; demo data requires --demo. A reviewed plan is revalidated before mutation. Unknown or incompatible firmware is refused. The normal installer runs shared metadata, kill-switch, upload-capability and transaction checks before Review; a standalone preflight is not required. Metadata uses verified ls -ldn, test, wc and sha256sum primitives. See [shared production integration](shared-production-integration.md).
 
 This pass corrects profile membership (numeric group_peer), anonymous UCI policy discovery, firmware-generated process references, configured kill-switch checks, optional standby validation and hidden LAN address conflicts. The historical three-slot engine, promotion, firewall preparation, connmark override, rollback and recovery order were preserved. Twelve critical historical function hashes are pinned in tooling/fastpath-baseline.json; the only normalized promotion differences are two notification labels.
 

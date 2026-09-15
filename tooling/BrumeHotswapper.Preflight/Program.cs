@@ -11,26 +11,19 @@ public static class Program
     {
         var app = new Application();
         try {
-            if (args.Contains("--help")) { MessageBox.Show("Launch directly for the focused read-only preflight. Select the local Brume archive folder if requested.\nOptional: <repository> <archive-directory> <sh.exe> <result.json> [--follow-up]\nNo credentials are accepted on the command line.", "Preflight help"); return; }
-            string repository, archive, shell, result;
-            bool followUp = true;
-            if (args.Length is 4 or 5) {
-                (repository, archive, shell, result) = (args[0], args[1], args[2], args[3]);
-                followUp = args.Length == 5 && args[4] == "--follow-up";
-            } else {
+            if (args.Contains("--help")) { MessageBox.Show("Optional developer tool: shared production read-only checks. No archive is required.\nUsage: BrumeHotswapper.Preflight.exe [--output <result.json>]\nCredentials are entered interactively and never saved. The normal installer performs its own checks.", "Preflight help"); return; }
+            string result;
+            if (args.Length == 2 && args[0] == "--output") result=args[1];
+            else if (args.Length is 4 or 5) result=args[3]; // Accept old launch commands; evidence paths are no longer used.
+            else {
                 if (args.Length != 0 && !args.SequenceEqual(new[]{"--follow-up"})) throw new IOException("Unsupported arguments. Use --help.");
-                repository = FindRepository() ?? throw new IOException("Cannot locate the repository. Launch from its build output or supply paths with --help.");
-                var picker = new Microsoft.Win32.OpenFolderDialog { Title = "Select the historical Brume 3 archive folder (containing brume_dump.zip)" };
-                if (picker.ShowDialog() != true) { MessageBox.Show("A local archive is required for the firmware comparison. No router connection was made."); return; }
-                archive = picker.FolderName;
-                shell = FindShell() ?? throw new IOException("Cannot find a local Git sh.exe. Supply its path using the documented arguments.");
-                result = Path.Combine(repository, "artifacts", "preflight", "result-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".json");
+                var repository=FindRepository();
+                var folder=repository==null?Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"BrumeHotswapper","Diagnostics"):Path.Combine(repository,"artifacts","preflight");
+                result=Path.Combine(folder,"result-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".json");
             }
-            if (!File.Exists(Path.Combine(repository, "BrumeHotswapper.slnx")) || !File.Exists(Path.Combine(archive, "brume_dump.zip")) || !File.Exists(shell))
-                throw new IOException("Required repository, brume_dump.zip archive, or local shell is missing. Use --help to supply valid paths.");
-            app.Run(new PreflightWindow(repository, archive, shell, Path.GetFullPath(result), followUp));
+            app.Run(new PreflightWindow(Path.GetFullPath(result)));
         } catch (IOException e) { MessageBox.Show(e.Message, "Preflight cannot start", MessageBoxButton.OK, MessageBoxImage.Error); }
-          catch { MessageBox.Show("Preflight could not start. Verify local evidence paths using --help.", "Preflight cannot start"); }
+          catch { MessageBox.Show("Preflight could not start. Check the result path using --help.", "Preflight cannot start"); }
     }
     public static string? FindRepository()
     {
@@ -39,12 +32,7 @@ public static class Program
                 if (File.Exists(Path.Combine(d.FullName, "BrumeHotswapper.slnx"))) return d.FullName;
         return null;
     }
-    private static string? FindShell()
-    {
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        return new[]{Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git", "usr", "bin", "sh.exe"),
-            Path.Combine(home, ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "native", "git", "usr", "bin", "sh.exe")}.FirstOrDefault(File.Exists);
-    }
+
 }
 public sealed class PreflightWindow : Window
 {
@@ -54,10 +42,10 @@ public sealed class PreflightWindow : Window
     private readonly Button run = new() { Content = "Connect and run READ-ONLY preflight", Padding = new Thickness(12), Margin = new Thickness(0, 0, 0, 12) };
     private readonly List<Check> checks = [];
     private readonly CancellationTokenSource cancellation = new();
-    public PreflightWindow(string repository, string archive, string shell, string resultPath, bool followUp = false)
+    public PreflightWindow(string resultPath, bool followUp = true)
     {
         Title = "Brume 3 — READ-ONLY preflight"; Width = 780; Height = 720; WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        if (followUp) run.Content = "Connect: firmware / routing / metadata ONLY";
+        if (followUp) run.Content = "Run shared production checks";
         var panel = new StackPanel { Margin = new Thickness(24) };
         panel.Children.Add(new TextBlock { Text = "Read-only router preflight", FontSize = 26, Margin = new Thickness(0, 0, 0, 14) });
         panel.Children.Add(new TextBlock { Text = "Uses the installer's SSH authentication and inspection code. No installation, patching, uploads, UCI changes, service actions or notifications. Enter credentials here only; they are never saved.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 16) });
@@ -93,7 +81,7 @@ public sealed class PreflightWindow : Window
                 var connect = session.ConnectAsync(address.Text.Trim(), secret, cancellation.Token); secret = "";
                 var identity = await connect;
                 Report(new("Authentication", "PASS", "Authenticated using installer SSH.NET flow and interactive host trust. Credentials remain session-only."));
-                var runner = new Runner(session, repository, archive, shell, Report);
+                var runner = new Runner(session, Report);
                 if (followUp) await runner.RunFollowUpAsync(identity, cancellation.Token);
                 else await runner.RunAsync(identity, cancellation.Token);
                 File.WriteAllText(resultPath, JsonSerializer.Serialize(new { State = "Complete", Checks = checks }, new JsonSerializerOptions { WriteIndented = true }));

@@ -130,21 +130,12 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         var owned = local.Split('\n').Select(l => l.Split('/')[0]).ToHashSet();
         return new(network, clients.Values.Where(c => !owned.Contains(c.Ip)).OrderBy(c => c.Hostname).ToArray(), reservations, observations, owned.ToArray());
     }
-    public async Task<RouterSnapshot> InspectAsync(InstallerConfiguration c, CancellationToken ct, bool enforceKillSwitch = true)
+    public async Task<(string ActiveInterface,string ActivePeer)> VerifyPolicySlotsAsync(VpnProfile profile,CancellationToken ct)
     {
-        ConfigurationGenerator.Validate(c);
-        using var board = JsonDocument.Parse(await router.ExecuteAsync("ubus call system board", ct));
-        var live = c.Router with { Model = board.RootElement.GetProperty("model").GetString() ?? "", Board = board.RootElement.GetProperty("board_name").GetString() ?? "" };
-        if (!live.IsBrume) throw new SafeFailure("The connected device is not a GL-MT5000.");
-        var hash = (await router.ExecuteAsync("sha256sum /usr/bin/rtp2.sh | awk '{print $1}'", ct)).Trim();
-        if (CompatibilityCatalog.Classify(hash) is Compatibility.Unknown or Compatibility.KnownIncompatible || !CompatibilityCatalog.TestedFirmware.Contains(c.Router.Firmware))
-            throw new SafeFailure("Firmware compatibility must pass before installation planning.");
-        if (hash != c.Router.Rtp2Hash) throw new SafeFailure("Firmware changed since compatibility review. Reconnect and review it again.");
-        var policy = Identifier(c.Profile.PolicySection);
+        var policy = Identifier(profile.PolicySection);
         string group = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.group_id", ct)).Trim();
         string tunnel = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.tunnel_id", ct)).Trim();
-        if (group != c.Profile.GroupId || tunnel != c.Profile.TunnelId) throw new SafeFailure("The selected VPN list changed. Discover it again.");
-        await router.ExecuteAsync("test -x /usr/bin/setup_instance && test -x /etc/init.d/dnsmasq && command -v wg >/dev/null && command -v crontab >/dev/null && command -v sha256sum >/dev/null && command -v iptables >/dev/null && command -v stat >/dev/null && test \"$(id -u)\" = 0", ct);
+        if (group != profile.GroupId || tunnel != profile.TunnelId) throw new SafeFailure("The selected VPN list changed. Discover it again.");
         var active = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim();
         var activePeer = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.peer_id", ct)).Trim();
         if (!new[] {"wgclient1", "wgclient2", "wgclient3"}.Contains(active))
@@ -152,7 +143,7 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         foreach (var slot in new[] {"wgclient1", "wgclient2", "wgclient3"})
         {
             var other = (await router.ExecuteAsync($"uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.via='{slot}'$/\\1/p\"", ct)).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            foreach (var reference in other.Where(s => s != c.Profile.PolicySection))
+            foreach (var reference in other.Where(s => s != profile.PolicySection))
             {
                 // Firmware handle_always_vpn_policy maintains this process rule for the active VPN.
                 bool generated = reference == "gl_process_vpn" && slot == active &&
@@ -172,6 +163,22 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
             if (owner != group) throw new SafeFailure($"WireGuard instance {slot} is occupied by another VPN list. Disconnect it before installing.");
 
         }
+        if ((await router.ExecuteAsync($"uci -q get network.{active}.config", ct)).Trim() != "peer_" + activePeer)
+            throw new SafeFailure("The active VPN policy and WireGuard instance disagree. Reconnect the selected VPN first.");
+        return (active,activePeer);
+    }
+    public async Task<RouterSnapshot> InspectAsync(InstallerConfiguration c, CancellationToken ct)
+    {
+        ConfigurationGenerator.Validate(c);
+        using var board = JsonDocument.Parse(await router.ExecuteAsync("ubus call system board", ct));
+        var live = c.Router with { Model = board.RootElement.GetProperty("model").GetString() ?? "", Board = board.RootElement.GetProperty("board_name").GetString() ?? "" };
+        if (!live.IsBrume) throw new SafeFailure("The connected device is not a GL-MT5000.");
+        await RouterPrerequisites.VerifyFirmwareAsync(router, live, ct);
+        await RouterPrerequisites.EnsureNoTransactionAsync(router, ct);
+        await router.ExecuteAsync(RouterPrerequisites.CapabilitiesCommand, ct);
+        var (active, activePeer) = await VerifyPolicySlotsAsync(c.Profile, ct);
+        var policy = Identifier(c.Profile.PolicySection);
+        string group = c.Profile.GroupId, tunnel = c.Profile.TunnelId;
         var members = ConfigurationGenerator.Locations(c).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Split('\t')[5]).ToHashSet();
         if (!members.Contains(activePeer)) throw new SafeFailure("The currently active VPN location must be assigned to a tier before installation.");
         foreach (var peer in c.Tiers.Where(t => t.Tier > 0).SelectMany(t => t.Locations).SelectMany(g => g.Connections))
@@ -182,15 +189,8 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
                 throw new SafeFailure("VPN pool membership changed. Discover VPN lists again.");
             await router.ExecuteAsync($"grep -Fxq '{c.Profile.GroupId}_{peer.PeerId}' /etc/vpn_profiles.d/profile{tunnel}", ct);
         }
-        if (enforceKillSwitch) await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
-        var marker = (await router.ExecuteAsync("grep -Fc '# vpn-watch GL reconciliation guard v1' /usr/bin/rtp2.sh || true", ct)).Trim();
-        if (CompatibilityCatalog.IsPatched(hash))
-        { if (marker != "1") throw new SafeFailure("The existing GL reconciliation guard marker is missing or duplicated."); }
-        else if (marker != "0") throw new SafeFailure("An unrecognized existing reconciliation guard needs review before updating.");
-        else await router.ExecuteAsync("test \"$(grep -Fxc 'cmd=\"$1\";shift' /usr/bin/rtp2.sh)\" = 1 && sh -n /usr/bin/rtp2.sh", ct);
+        await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
         await router.ExecuteAsync("test -z \"$(uci changes dhcp)\"", ct);
-        if ((await router.ExecuteAsync($"uci -q get network.{active}.config", ct)).Trim() != "peer_" + activePeer)
-            throw new SafeFailure("The active VPN policy and WireGuard instance disagree. Reconnect the selected VPN first.");
         var files = new List<FileState>();
         foreach (var path in DeploymentPlanning.Paths)
         {

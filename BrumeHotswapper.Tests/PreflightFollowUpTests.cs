@@ -25,7 +25,7 @@ public class PreflightFollowUpTests
         Assert.DoesNotContain("synthetic-secret", FirmwareRead.FailureCategory(new IOException("synthetic-secret")));
     }
     private static string Metadata(string mode = "755", string uid = "0", string gid = "0", string symlink = "0") =>
-        $"symlink={symlink}\r\nexists=1\r\nregular=1\r\nreadable=1\r\nuid={uid}\r\ngid={gid}\r\nmode={mode}\r\nsize=1234\r\nsha256={new string('a',64)}\r\n";
+        $"symlink={symlink}\r\nexists=1\r\ntype=-\r\nregular=1\r\nreadable=1\r\nuid={uid}\r\ngid={gid}\r\nmode={mode}\r\nsize=1234\r\nsha256={new string('a',64)}\r\n";
     [Fact] public void LegacyScript755IsMigrationWarningAndFirmware755Passes()
     {
         var script = MetadataReview.Evaluate("/root/vpn-watch.sh", Metadata());
@@ -49,7 +49,7 @@ public class PreflightFollowUpTests
     {
         var checks = MetadataReview.Evaluate("/root/vpn-watch-locations.tsv", "symlink=0\nexists=0\n");
         Assert.DoesNotContain(checks, x => x.Status == "BLOCK");
-        Assert.Contains(checks, x => x.Detail.Contains("Required after installation"));
+        Assert.Contains(checks, x => x.Detail.Contains("required after installation"));
     }
     [Fact] public void DiagnosticTableParserDoesNotGrantRoutingCompatibility()
     {

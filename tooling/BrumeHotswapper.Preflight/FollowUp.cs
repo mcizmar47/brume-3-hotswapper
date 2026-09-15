@@ -4,83 +4,68 @@ using BrumeHotswapper.Installer.Services;
 namespace BrumeHotswapper.Preflight;
 public sealed partial class Runner
 {
-    private async Task FirmwareChecksAsync(RouterIdentity identity, CancellationToken ct)
+    private async Task FirmwareChecksAsync(RouterIdentity identity,CancellationToken ct)
     {
-        report(new("Live firmware SHA", Regex.IsMatch(identity.Rtp2Hash, "^[a-f0-9]{64}$") ? "PASS" : "BLOCK", Regex.IsMatch(identity.Rtp2Hash, "^[a-f0-9]{64}$") ? identity.Rtp2Hash : "Unrecognized hash format."));
-        await Step("Firmware marker/anchor", async () =>
-        {
-            var marker = (await read.ExecuteAsync("grep -Fc '# vpn-watch GL reconciliation guard v1' /usr/bin/rtp2.sh || true", ct)).Trim();
-            var anchor = (await read.ExecuteAsync("grep -Fxc 'cmd=\"$1\";shift' /usr/bin/rtp2.sh || true", ct)).Trim();
-            Add("Firmware marker/anchor", marker == "1" && anchor == "1", $"Unique guard marker: {marker == "1"}; unique anchor: {anchor == "1"}.");
+        await Step("Firmware compatibility",async()=>{
+            await RouterPrerequisites.VerifyFirmwareAsync(read,identity,ct);
+            Add("Firmware compatibility",true,CompatibilityCatalog.Classify(identity.Rtp2Hash)+"; shared catalog, hash, marker, anchor and syntax checks passed.");
         });
-        await Step("Firmware syntax", async () => { await read.ExecuteAsync("sh -n /usr/bin/rtp2.sh", ct); Add("Firmware syntax", true, "Syntax-only check passed; firmware not executed."); });
-        await Step("SFTP diagnostics", async () =>
-        {
-            var diagnostic = await session.ProbeFirmwareSftpAsync(ct);
-            report(new("SFTP diagnostics", diagnostic.StartsWith("SFTP connect,") ? "PASS" : "WARN", diagnostic + " SFTP is optional when the SSH stream capability passes."));
+        await Step("Upload capability",async()=>{
+            var kind=await session.ProbeUploadAsync(ct);
+            Add("Upload capability",true,"Verified "+kind+" using the production transport probe; no router files created.");
         });
-        await Step("Upload channel capability (no files)", async () => { var kind = await session.ProbeUploadAsync(ct); Add("Upload channel capability (no files)", true, "Verified " + kind + "; synthetic stdin hashed without creating router files."); });
-        await Step("Firmware bytes", async () => await FirmwareAsync(identity, ct));
     }
-    public async Task RunFollowUpAsync(RouterIdentity identity, CancellationToken ct)
+    public async Task RunFollowUpAsync(RouterIdentity identity,CancellationToken ct)
     {
-        Add("Connection identity consistency", identity.IsBrume && identity.Firmware == "4.9.0", "Rechecked identity/version for this new session; previously proven full discovery is not repeated.");
-        if (!identity.IsBrume) return;
-        await FirmwareChecksAsync(identity, ct);
-        await Step("Pending transaction", async () => {
-            var pending = (await read.ExecuteAsync("if [ -e /root/.hotswap-installer/transaction ] || [ -e /tmp/vpn-watch-installer-lock ]; then echo pending; else echo clear; fi", ct)).Trim();
-            Add("Pending transaction", pending == "clear", pending == "clear" ? "No pending transaction or lock." : "Pending transaction or lock requires review.");
+        Add("Identity/version",identity.IsBrume && CompatibilityCatalog.TestedFirmware.Contains(identity.Firmware),"Production authentication/identity result checked against the supported firmware catalog.");
+        if(!identity.IsBrume)return;
+        await FirmwareChecksAsync(identity,ct);
+        await Step("Pending transaction",async()=>{await RouterPrerequisites.EnsureNoTransactionAsync(read,ct);Add("Pending transaction",true,"No pending transaction or lock.");});
+        await Step("Required utilities",async()=>{await read.ExecuteAsync(RouterPrerequisites.CapabilitiesCommand,ct);Add("Required utilities",true,"Production command prerequisites passed.");});
+        foreach(var path in DeploymentPlanning.Paths)
+            await Step("File "+path,async()=>{
+                var fields=await FileMetadata.ReadAsync(read,path,ct);
+                var findings=MetadataReview.Evaluate(path,fields);
+                if(findings.All(f=>f.Status=="PASS")) Add("File "+path,true,"Shared production metadata policy passed.");
+                else foreach(var finding in findings.Where(f=>f.Status!="PASS")) report(finding);
+            });
+        await Step("VPN prerequisites",async()=>{
+            var profiles=await new VpnDiscovery(read).DiscoverPoliciesAsync(ct);
+            var profile=VpnDiscovery.AutoSelect(profiles)??throw new SafeFailure("A unique VPN policy was not established.");
+            await new RouterInspection(read,new KillSwitchVerifier()).VerifyPolicySlotsAsync(profile,ct);
+            Add("VPN prerequisites",true,"Shared policy/group, slot ownership and active-peer agreement checks passed.");
+            await RoutingDiagnostics.VerifyAsync(read,profile.PolicySection,report,ct);
         });
-        foreach (string path in DeploymentPlanning.Paths)
-            await Step("File " + path, async () => { foreach (var item in MetadataReview.Evaluate(path, string.Join("\n", (await FileMetadata.ReadAsync(read, path, ct)).Select(f => f.Key + "=" + f.Value)))) report(item); });
-        await Step("Routing follow-up", async () =>
+    }
+}
+// Optional rendering only. Diagnostics never grant safety and never gate execution of the verifier.
+public static class RoutingDiagnostics
+{
+    public static async Task CollectTablesAsync(IRouterTransport router,IEnumerable<string> tables,Action<Check> report,CancellationToken ct)
+    {
+        foreach(var table in tables.Where(t=>Regex.IsMatch(t,@"\A[A-Za-z0-9_]+\z")).Distinct())
         {
-            var policies = await read.ExecuteAsync(ReadOnlyTransport.Policies, ct);
-            var candidates = new List<VpnProfile>();
-            foreach (var row in policies.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var pair = row.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (pair.Length != 2 || !RouterInspection.IsPolicyIdentifier(pair[0]) || !Regex.IsMatch(pair[1], "^[0-9]+$")) continue;
-                var group = (await read.ExecuteAsync($"uci -q get route_policy.{RouterInspection.Identifier(pair[0])}.group_id || true", ct)).Trim();
-                if (Regex.IsMatch(group, "^[0-9]+$")) candidates.Add(new(pair[1], group, [], pair[0]));
-            }
-            if (candidates.Count != 1) throw new SafeFailure("Selected policy consistency is ambiguous; no broad rediscovery or guessed selection performed.");
-            var profile = candidates[0];
-            var key = RouterInspection.Identifier(profile.PolicySection);
-            var mark = (await read.ExecuteAsync($"uci -q get route_policy.{key}.mark", ct)).Trim();
-            var active = (await read.ExecuteAsync($"uci -q get route_policy.{key}.via", ct)).Trim();
-            if (!Regex.IsMatch(mark, "^0x[0-9a-fA-F]{1,8}$") || !Regex.IsMatch(active, "^wgclient[123]$")) throw new SafeFailure("Selected routing mark/interface has an unsupported format.");
-            report(new("Selected routing mark", "PASS", "Mark " + mark + "; active slot " + active + "; policy/provider identifiers withheld."));
-            var intent = (await read.ExecuteAsync($"uci -q get route_policy.{key}.killswitch || true", ct)).Trim();
-            Add("Layer A: configured intent", intent == "1", intent == "1" ? "Kill switch remains enabled." : "Kill-switch setting not verified enabled.");
-            var chain = "TUNNEL" + profile.TunnelId + "_ROUTE_POLICY";
-            var rules = await read.ExecuteAsync($"iptables -w -t mangle -S {chain}", ct);
-            report(new("Selected tunnel chain shape", "WARN", RoutingEvidence.Sanitize(rules)));
-            Add("Layer B: MARK/DROP", KillSwitchVerifier.HasPolicyRules(rules, chain, mark), "Evaluated exact paired marking/DROP scopes using the production parser.");
-            await Step("Layer B: chain attachment", async () => { await read.ExecuteAsync($"iptables -w -t mangle -C ROUTE_POLICY -m addrtype ! --dst-type LOCAL -j {chain}", ct); Add("Layer B: chain attachment", true, "Expected attachment exists."); });
-            report(new("ROUTE_POLICY shape", "WARN", RoutingEvidence.Sanitize(await read.ExecuteAsync("iptables -w -t mangle -S ROUTE_POLICY", ct))));
-            var policyRules = await read.ExecuteAsync("ip -4 rule show", ct);
-            report(new("IPv4 policy-rule shapes", "WARN", RoutingEvidence.Sanitize(policyRules)));
-            var tables = RoutingEvidence.SelectedTables(policyRules, mark).ToHashSet();
-            // Include earlier numeric lookups that the production verifier must inspect.
-            var selectedRule = Regex.Match(policyRules, $@"(?m)^\s*(\d+):\s+from all fwmark {Regex.Escape(mark)}/0xf000 lookup ");
-            if (selectedRule.Success && int.TryParse(selectedRule.Groups[1].Value, out int selectedPriority))
-                foreach (var line in policyRules.Split('\n')) {
-                    var earlier = Regex.Match(line, @"^\s*(\d+):.*\blookup ([0-9]+)\b");
-                    if (earlier.Success && int.TryParse(earlier.Groups[1].Value, out int priority) && priority < selectedPriority && RoutingProtection.CanMatch(line, Convert.ToUInt32(mark[2..],16)))
-                        tables.Add(earlier.Groups[2].Value);
-                }
-            report(new("Selected lookup candidates", "WARN", tables.Count + " selected/earlier table(s) found by diagnostic parser. This parser does not grant compatibility."));
-            int index = 0;
-            foreach (var table in tables)
-            {
-                var routes = await read.ExecuteAsync($"ip -4 route show table {table}", ct);
-                report(new("Selected routing table " + (++index), "WARN", "Table identifier format: " + (Regex.IsMatch(table, "^[0-9]+$") ? "numeric" : "named") + ". " + RoutingEvidence.Sanitize(routes)));
-            }
-            report(new("Active-slot route shapes", "WARN", RoutingEvidence.Sanitize(await read.ExecuteAsync($"ip -4 route show table all dev {active}", ct))));
-            await Step("Layer C: production verifier", async () => { await new KillSwitchVerifier().VerifyAsync(read, profile.PolicySection, ct); Add("Layer C: production verifier", true, "Existing complete verifier accepted this snapshot; no rule changes made."); });
-            Add("Routing snapshot consistency", mark == (await read.ExecuteAsync($"uci -q get route_policy.{key}.mark", ct)).Trim() && active == (await read.ExecuteAsync($"uci -q get route_policy.{key}.via", ct)).Trim(), "Rechecked selected mark/interface after collection; no transitions requested.");
-        });
+            try {var output=await router.ExecuteAsync("ip -4 route show table "+table,ct);report(new("Routing table diagnostic","WARN",RoutingEvidence.Sanitize(output)));}
+            catch(OperationCanceledException){throw;}
+            catch {report(new("Routing table diagnostic","WARN","Table unavailable or command returned nonzero; this diagnostic grants no safety result."));}
+        }
+    }
+    public static async Task VerifyAsync(IRouterTransport router,string policy,Action<Check> report,CancellationToken ct)
+    {
+        try {
+            await new KillSwitchVerifier().VerifyAsync(router,policy,ct);
+            report(new("Kill switch and IPv6","PASS","Shared production verifier passed configured intent, firewall enforcement, routing protection and IPv6 prerequisites."));
+            return;
+        } catch(OperationCanceledException){throw;}
+        catch(Exception e){report(new("Kill switch and IPv6","BLOCK",e is SafeFailure?e.Message:"Required safety evidence is unavailable; details withheld."));}
+        // Dump only after failure. Each optional command is isolated from all others.
+        try {
+            var rules=await router.ExecuteAsync("ip -4 rule show",ct);
+            report(new("Routing rule diagnostic","WARN",RoutingEvidence.Sanitize(rules)));
+            var tables=Regex.Matches(rules,@"\blookup ([A-Za-z0-9_]+)\b").Select(m=>m.Groups[1].Value);
+            await CollectTablesAsync(router,tables,report,ct);
+        } catch(OperationCanceledException){throw;}
+        catch {report(new("Routing diagnostics","WARN","Optional rule dump unavailable; production BLOCK remains authoritative."));}
     }
 }
 public static class RoutingEvidence

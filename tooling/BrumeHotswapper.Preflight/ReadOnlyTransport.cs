@@ -12,7 +12,9 @@ public sealed class ReadOnlyTransport(IRouterTransport inner) : IRouterTransport
     public static readonly string Daemons = "for f in /proc/[0-9]*/cmdline; do [ -r \"$f\" ] || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq '/root/vpn-watch.sh' || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq daemon || continue; basename \"$(dirname \"$f\")\"; done";
     public static string SlotReferences(string slot) => $"uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.via='{slot}'$/\\1/p\"";
     public static string ProfileMembers(string tunnel) => $"sed -n '/^[0-9][0-9]*_[0-9][0-9]*$/p' /etc/vpn_profiles.d/profile{tunnel}";
-    private static readonly HashSet<string> Exact = [Policies, Hosts, Daemons,
+    private static readonly HashSet<string> Exact = [Policies, Hosts, Daemons, RouterPrerequisites.PendingCommand, RouterPrerequisites.CapabilitiesCommand,
+        "sha256sum /usr/bin/rtp2.sh | awk '{print $1}'",
+        "test \"$(grep -Fxc 'cmd=\"$1\";shift' /usr/bin/rtp2.sh)\" = 1 && sh -n /usr/bin/rtp2.sh",
         "uci -q get route_policy.gl_process_vpn", "uci -q get glipv6.globals.enabled || true",
         "ip -4 rule show", "ip -4 neigh show", "ip -o -4 addr show | awk '{print $4}'",
         "if [ -r /tmp/dhcp.leases ]; then cat /tmp/dhcp.leases; fi",

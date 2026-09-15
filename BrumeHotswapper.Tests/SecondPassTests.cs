@@ -67,7 +67,7 @@ public class SecondPassTests
     }
     [Fact] public async Task RealTransactionCanCompleteWithVerifiedPreconditions()
     {
-        var fake=new RouterFixture(); var installer=new RouterInstaller(fake,new VerifiedKillSwitch());
+        var fake=new RouterFixture(); var installer=new RouterInstaller(fake,new KillSwitchVerifier());
         var plan=await installer.PlanAsync(Config(),CancellationToken.None);
         var result=await installer.InstallAsync(plan,new Progress<string>(),CancellationToken.None);
         Assert.True(result.Success); Assert.Equal(7,fake.Installed.Count); Assert.True(fake.Running);
@@ -94,7 +94,8 @@ public class SecondPassTests
     [Fact] public async Task FailedKillSwitchMakesNoWrites()
     {
         var fake=new RouterFixture(); var installer=new RouterInstaller(fake,new FailedKillSwitch());
-        var plan=await installer.PlanAsync(Config(),CancellationToken.None);
+        await Assert.ThrowsAsync<SafeFailure>(()=>installer.PlanAsync(Config(),CancellationToken.None));
+        var plan=await new RouterInstaller(fake,new VerifiedKillSwitch()).PlanAsync(Config(),CancellationToken.None);
         await Assert.ThrowsAsync<SafeFailure>(()=>installer.InstallAsync(plan,new Progress<string>(),CancellationToken.None));
         Assert.Empty(fake.Uploads); Assert.Empty(fake.Installed);
     }
@@ -140,13 +141,21 @@ public class SecondPassTests
                 bool exists = metadata.Path == "/usr/bin/rtp2.sh" || Installed.ContainsKey(metadata.Path);
                 result = metadata.Field switch {
                     "symlink" => "0", "exists" => exists ? "1" : "0", "regular" or "readable" => "1",
-                    "uid" or "gid" => "0", "mode" => metadata.Path == "/usr/bin/rtp2.sh" ? "755" : metadata.Path.EndsWith(".sh") ? "700" : "600",
+                    "listing" => (metadata.Path == "/usr/bin/rtp2.sh" ? "-rwxr-xr-x" : metadata.Path.EndsWith(".sh") ? "-rwx------" : "-rw-------") + " 1 0 0 123 Jan 1 00:00 " + metadata.Path,
                     "size" => "123", "sha256" => metadata.Path == "/usr/bin/rtp2.sh" ? FirmwareHash : Hash(Installed[metadata.Path]), _ => ""
                 };
             }
+            else if(cmd==RouterPrerequisites.PendingCommand) result="clear";
             else if(cmd=="ubus call system board") result="{\"model\":\"GL.iNet GL-MT5000\",\"board_name\":\"glinet,gl-mt5000\"}";
             else if(cmd.StartsWith("sha256sum /usr/bin/rtp2.sh")) result=FirmwareHash;
             else if(cmd.StartsWith("sha256sum /root/.hotswap-installer/transaction/rtp2.preview")) result=CompatibilityCatalog.PatchedHash;
+            else if(cmd is "uci -q get route_policy.vpn.killswitch || true" or "uci -q get route_policy.vpn.enabled || true") result="1";
+            else if(cmd=="uci -q get glipv6.globals.enabled || true") result="0";
+            else if(cmd=="uci -q get route_policy.vpn.mark") result="0x1000";
+            else if(cmd=="iptables -w -t mangle -S TUNNEL42_ROUTE_POLICY") result="-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j MARK --set-xmark 0x1000/0xf000\n-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j DROP";
+            else if(cmd.StartsWith("iptables -w -t mangle -C")) result="";
+            else if(cmd=="ip -4 rule show") result="0: from all lookup local\n6000: from all fwmark 0x1000/0xf000 lookup 1001";
+            else if(cmd=="ip -4 route show table 1001") result="default dev wgclient1\nblackhole default metric 254";
             else if(cmd=="uci -q get route_policy.vpn.group_id" || cmd=="uci -q get wireguard.peer_11.group_id") result="7";
             else if(cmd=="uci -q get route_policy.vpn.tunnel_id") result="42";
             else if(cmd=="uci -q get route_policy.vpn.via") result="wgclient1";
@@ -155,13 +164,7 @@ public class SecondPassTests
             else if(cmd=="uci -q get wireguard.peer_11.location") result="Germany,Frankfurt";
             else if(cmd.StartsWith("uci -q show route_policy")) result="vpn";
             else if(cmd.StartsWith("grep -Fc '# vpn-watch")) result=CompatibilityCatalog.IsPatched(FirmwareHash)?"1":"0";
-            else if(cmd.StartsWith("test ! -L '/") && cmd.Contains("stat -c %a"))
-            {
-                var path=Regex.Match(cmd,@"test ! -L '([^']+)'").Groups[1].Value;
-                result=path=="/usr/bin/rtp2.sh"?FirmwareHash+"\n755":Installed.TryGetValue(path,out var existing)?Hash(existing)+"\n"+(path.EndsWith(".sh")?"700":"600"):"absent";
-            }
             else if(cmd.StartsWith("for f in /proc/")) result=Running?"123":"";
-            else if(cmd=="stat -c %a '/usr/bin/rtp2.sh'") result="755";
             else if(cmd.StartsWith("crontab -l")) result=Cron;
             else if(cmd.Contains("&& crontab /root/")) Cron=Uploads["/root/.hotswap-installer/transaction/cron"];
             else if(cmd.Contains("cp -p '/root/.hotswap-installer/transaction/"))

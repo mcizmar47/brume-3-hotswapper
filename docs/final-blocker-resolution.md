@@ -83,3 +83,7 @@ Do not repeat full peer/location, DHCP/LAN, cron or daemon discovery in this foc
 - Focused tests cover historical idempotence, masked-rule overlap, earlier table escapes, WAN/wrong-slot/missing-terminal routes, independent metadata fields, binary/empty/1 MiB uploads, cancellation, truncation, size/hash mismatch, unsafe paths, oversized payloads, SFTP fallback and unavailable transports.
 
 No automated test is presented as a live SSH upload or live filesystem test.
+
+## Shared production correction
+
+The target has no stat command/applet. [Shared production integration](shared-production-integration.md) supersedes this report's metadata assumptions and standalone preflight workflow. The installer now runs the shared checks itself before Review; the diagnostic helper is optional and archive-free.

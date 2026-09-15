@@ -88,8 +88,7 @@ public class FinalBlockerTests
         public Task UploadAsync(string p,string s,CancellationToken ct)=>throw new Exception();
         public Task<string> ExecuteAsync(string c,CancellationToken ct)=>Task.FromResult(c switch {
             var x when x.StartsWith("if [ -L") => "0\r\n", var x when x.StartsWith("if [") => "1\n",
-            var x when x.StartsWith("stat -c '%u'") || x.StartsWith("stat -c '%g'") => "0\n",
-            var x when x.StartsWith("stat -c '%a'") => "755\n",
+            var x when x.StartsWith("LC_ALL=C ls -ldn ") => "-rwxr-xr-x    1 0 0 55880 Jan 1 00:00 /root/vpn-watch.sh\n",
             var x when x.StartsWith("wc -c") => "   81001\n",
             var x when x.StartsWith("sha256sum") => new string('a',64)+"\n", _=>throw new Exception() });
     }

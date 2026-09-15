@@ -31,12 +31,13 @@ public sealed class DeploymentUpload(IUploadChannel channel)
         try { streamWorks = (await channel.StreamAsync("sha256sum | awk '{print $1}'", probe, ct)).Trim() == Hash(probe); }
         catch (OperationCanceledException) { throw; }
         catch { streamWorks = false; }
+        if (streamWorks) { selected = UploadKind.SshStream; return selected.Value; }
         bool sftpWorks;
         try { sftpWorks = await channel.SftpAvailableAsync(ct); }
         catch (OperationCanceledException) { throw; }
         catch { sftpWorks = false; }
         // Streaming is preferred: supported on the tested router without a subsystem dependency.
-        selected = streamWorks ? UploadKind.SshStream : sftpWorks ? UploadKind.Sftp : null;
+        selected = sftpWorks ? UploadKind.Sftp : null;
         return selected ?? throw new SafeFailure("No verified deployment upload transport is available.");
     }
     public async Task UploadAsync(string path, ReadOnlyMemory<byte> bytes, CancellationToken ct)
@@ -48,7 +49,7 @@ public sealed class DeploymentUpload(IUploadChannel channel)
         string owner = (await channel.CommandAsync($"cat {Stage}/owner", ct)).Trim();
         if (!Regex.IsMatch(owner, "^[a-f0-9]{32}$")) throw new SafeFailure("Upload requires an owned transaction journal.");
         string temporary = Stage + "/.upload-" + Guid.NewGuid().ToString("N");
-        string guard = $"test ! -L /root/.hotswap-installer && test ! -L {Stage} && test -d {Stage} && test ! -L {Stage}/owner && test \"$(cat {Stage}/owner)\" = '{owner}' && test \"$(id -u)\" = 0 && test \"$(stat -c '%u:%g:%a' {Stage})\" = 0:0:700";
+        string guard = $"test ! -L /root/.hotswap-installer && test ! -L {Stage} && test -d {Stage} && test ! -L {Stage}/owner && test \"$(cat {Stage}/owner)\" = '{owner}' && test \"$(id -u)\" = 0 && {FileMetadata.MatchesCommand(Stage, "700", 'd')}";
         string cleanup = $"if test ! -L /root/.hotswap-installer && test ! -L {Stage} && test \"$(cat {Stage}/owner)\" = '{owner}'; then rm -f '{temporary}'; fi";
         try
         {
@@ -60,7 +61,7 @@ public sealed class DeploymentUpload(IUploadChannel channel)
                 await channel.CommandAsync("set -e; " + prepare + $": > '{temporary}'", ct);
                 await channel.SftpAsync(temporary, bytes, ct);
             }
-            string metadata = await channel.CommandAsync(guard + $" && test -f '{temporary}' && test ! -L '{temporary}' && test \"$(stat -c '%u:%g:%a' '{temporary}')\" = 0:0:600 && wc -c < '{temporary}' && sha256sum '{temporary}' | awk '{{print $1}}'", ct);
+            string metadata = await channel.CommandAsync(guard + $" && test -f '{temporary}' && test ! -L '{temporary}' && {FileMetadata.MatchesCommand(temporary, "600")} && wc -c < '{temporary}' && sha256sum '{temporary}' | awk '{{print $1}}'", ct);
             var fields = metadata.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
             if (fields.Length != 2 || !long.TryParse(fields[0], out long size) || size != bytes.Length || fields[1] != Hash(bytes.Span))
                 throw new SafeFailure("Staged upload length or SHA-256 verification failed.");

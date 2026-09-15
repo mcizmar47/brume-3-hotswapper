@@ -44,7 +44,10 @@ public static class RoutingProtection
             // Earlier conditional lookups may apply to a subset. Inspect their entire table conservatively.
             var lookup = Regex.Match(body, @"^from (?:all|[0-9./]+)(?: iif [A-Za-z0-9_.-]+)? lookup ([A-Za-z0-9_]+)( suppress_prefixlength 0)?$");
             if (!lookup.Success) return false;
-            string routes = await router.ExecuteAsync("ip -4 route show table " + lookup.Groups[1].Value, ct);
+            string routes;
+            try { routes = await router.ExecuteAsync("ip -4 route show table " + lookup.Groups[1].Value, ct); }
+            catch (OperationCanceledException) { throw; }
+            catch { throw new SafeFailure("Required earlier routing-table evidence is unavailable. Kill-switch routing safety cannot be established."); }
             if (!SafeRoutes(routes, active, lookup.Groups[2].Success)) return false;
         }
         return true;

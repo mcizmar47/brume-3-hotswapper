@@ -98,6 +98,8 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
     public async Task<InstallationPlan> PlanAsync(InstallerConfiguration c, CancellationToken ct)
     {
         RequireBrume();
+        reviewedPlan = null;
+        await ProbeUploadAsync(ct);
         reviewedPlan = await new RouterInstaller(this, new KillSwitchVerifier()).PlanAsync(c, ct);
         return reviewedPlan;
     }
