@@ -39,3 +39,5 @@ GL firmware 4.9.0 is the project's recorded tested version and the supplied expo
 - All assigned peers must still be present in the selected profile during installation. Therefore next configured rank equals next profile-backed rank at validation; an empty standby is allowed. Ongoing profile edits require rediscovery.
 - LAN selection is restricted to a usable IPv4 subnet. Pool start/limit are read as metadata; the installer does not allocate a new pool or assume a neighbour is online. Static addresses are checked against every observed lease/neighbour/reservation address, including observations hidden by display grouping. All router-owned IPv4 addresses are excluded.
 - Pool allocation behavior, live dnsmasq reloads, UCI private-delta behavior and simultaneous GL panel edits need controlled integration testing. No broader DHCP allocation semantics are inferred from the captured numeric settings.
+
+For the follow-up structural/hash investigation and exact proposed read-only checks, see [guard hash investigation](guard-hash-investigation.md).

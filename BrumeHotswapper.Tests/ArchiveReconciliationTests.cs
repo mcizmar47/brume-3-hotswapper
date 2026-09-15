@@ -134,8 +134,10 @@ public class ArchiveReconciliationTests
     {
         var fake = new RouterFixture();
         var router = new Intercept(fake) { Read = cmd => cmd switch {
-            var x when x.StartsWith("uci -q show route_policy") && x.Contains(".tunnel_id=") => "@rule[0] 42\n",
-            "uci -q get route_policy.'@rule[0]'.group_id" => "7",
+            var x when x.StartsWith("uci -q show route_policy") && x.Contains(".tunnel_id=") => "gl_process 40\ngl_process_vpn 41\n@rule[0] 42\n",
+            "uci -q get route_policy.gl_process.group_id || true" => "",
+            "uci -q get route_policy.gl_process_vpn.group_id || true" => "",
+            "uci -q get route_policy.'@rule[0]'.group_id || true" => "7",
             var x when x.Contains("sed -n 's/^7_") => "peer_11\n",
             "uci -q get wireguard.peer_11.group_id || true" => "7",
             "uci -q get wireguard.peer_11.location || true" => "A,One",

@@ -27,6 +27,25 @@ def function(name):
 
 with tempfile.TemporaryDirectory(prefix="brume-shell-") as directory:
     directory = pathlib.Path(directory)
+    # Run the actual installer backup command with synthetic local paths.
+    # set -e does not stop at a failed non-final command in an && list.
+    installer = (ROOT / 'BrumeHotswapper.Installer/Services/RouterInstaller.cs').read_text(encoding='utf-8')
+    statement = next(line for line in installer.splitlines() if 'set -e; test ! -L {Q(backup)}' in line)
+    command = statement.split('ExecuteAsync($"', 1)[1].rsplit('", ct)', 1)[0]
+    original_file, backup_file = directory / 'original', directory / 'backup'
+    original_file.write_bytes(b'concurrent edit')
+    backup_file.write_bytes(b'original content')
+    expected_hash = hashlib.sha256(backup_file.read_bytes()).hexdigest()
+    command = command.replace('{Q(backup)}', "'" + backup_file.as_posix() + "'")
+    command = command.replace('{Q(before.Path)}', "'" + original_file.as_posix() + "'")
+    command = command.replace('{Q(before.Hash)}', "'" + expected_hash + "'")
+    command = command.replace('\\"', '"').replace('{{', '{').replace('}}', '}')
+    # The bundled Windows shell omits sha256sum; compute real hashes with Python.
+    hash_tool = "sha256sum() { '" + pathlib.Path(sys.executable).as_posix() + "' -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], chr(114)+chr(98)).read()).hexdigest())' \"$1\"; }\n"
+    command = hash_tool + command
+    run(command, 1)  # A valid old backup must not hide a changed source file.
+    original_file.write_bytes(backup_file.read_bytes())
+    run(command)
     locations = directory / "locations.tsv"
     locations.write_text("1\t1\t1\taaa\tGermany / Frankfurt\t11\n2\t1\t2\tbbb\tGermany / Berlin\t12\n3\t2\t1\tccc\tFrance / Paris\t13\n4\t3\t1\tddd\tJapan / Tokyo\t14\n", encoding="utf-8")
     definitions = '\n'.join(function(name) for name in ["peer_rank", "peer_tier", "rank_major_tier", "rank_label", "rank_order", "tier1_ranks", "recovery_ranks"])

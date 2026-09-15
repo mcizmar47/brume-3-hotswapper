@@ -73,7 +73,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                 if (before.Exists)
                 {
                     var backup = Home + "/backups/" + before.Hash;
-                    await router.ExecuteAsync($"set -e; test ! -L {Q(backup)} && test \"$(sha256sum {Q(before.Path)} | awk '{{print $1}}')\" = {Q(before.Hash)} && if [ ! -f {Q(backup)} ]; then cp {Q(before.Path)} {Q(backup)} && chmod 600 {Q(backup)}; fi; test \"$(sha256sum {Q(backup)} | awk '{{print $1}}')\" = {Q(before.Hash)}", ct);
+                    await router.ExecuteAsync($"set -e; test ! -L {Q(backup)}; test \"$(sha256sum {Q(before.Path)} | awk '{{print $1}}')\" = {Q(before.Hash)}; if [ ! -f {Q(backup)} ]; then cp {Q(before.Path)} {Q(backup)}; chmod 600 {Q(backup)}; fi; test \"$(sha256sum {Q(backup)} | awk '{{print $1}}')\" = {Q(before.Hash)}", ct);
                 }
             }
             // Exclude only owned jobs while replacing/stopping the watchdog. Other cron lines survive.

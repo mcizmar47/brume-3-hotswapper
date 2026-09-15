@@ -71,9 +71,11 @@ public class DiscoveryTests
         {
             Commands.Add(cmd);
             return Task.FromResult(cmd switch {
-                var c when c.StartsWith("uci -q show route_policy")=>"policyA 901\npolicyB 902\n",
-                "uci -q get route_policy.policyA.group_id"=>"71",
-                "uci -q get route_policy.policyB.group_id"=>"72",
+                var c when c.StartsWith("uci -q show route_policy")=>"gl_process 800\ngl_process_vpn 801\npolicyA 901\npolicyB 902\n",
+                "uci -q get route_policy.gl_process.group_id || true"=>"",
+                "uci -q get route_policy.gl_process_vpn.group_id || true"=>"",
+                "uci -q get route_policy.policyA.group_id || true"=>"71",
+                "uci -q get route_policy.policyB.group_id || true"=>"72",
                 var c when c.Contains("profile901")=>"peer_501\n",
                 var c when c.Contains("profile902")=>"peer_502\n",
                 "uci -q get wireguard.peer_501.group_id || true"=>"71",
