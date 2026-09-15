@@ -14,7 +14,7 @@ public static class RoutingProtection
             return ((selected ^ value) & mask & 0xf000u) == 0;
         } catch (Exception e) when (e is FormatException or OverflowException) { return true; }
     }
-    public static bool SafeRoutes(string routes, string active, bool suppressDefault = false)
+    public static bool SafeRoutes(string routes, string active, bool suppressDefault = false, VerifiedLanLink? lan = null)
     {
         foreach (var line in routes.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()))
         {
@@ -22,14 +22,37 @@ public static class RoutingProtection
             if (Regex.IsMatch(line, @"^(unreachable|blackhole|prohibit) ")) continue;
             if (Regex.IsMatch(line, @"^(local|broadcast) ")) continue; // host delivery, never a WAN forward
             if (Regex.IsMatch(line, @"^(throw|unicast|nat|multicast) ")) return false;
+            if (lan?.ContainsDirectRoute(line) == true) continue;
             if (!Regex.IsMatch(line, $@"\bdev {Regex.Escape(active)}(?: |$)")) return false;
             if (Regex.IsMatch(line, @"\b(via|nexthop|encap)\b")) return false;
         }
         return true;
     }
+    public static bool ProvesEmptyTable(string dump,string table)
+    {
+        if (!Regex.IsMatch(table,@"\A[0-9]+\z") || table is "253" or "254" or "255") return false;
+        foreach (var row in dump.Split('\n',StringSplitOptions.RemoveEmptyEntries))
+        {
+            // Reject partial/unsupported renderings and unresolved table aliases rather than
+            // mistaking missing text for evidence of an empty FIB table.
+            if (!Regex.IsMatch(row.Trim(),@"\A(?:(?:local|broadcast|unreachable|blackhole|prohibit|throw|unicast) )?(?:default|(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:/[0-9]+)?)(?: |$)")) return false;
+            var id=Regex.Match(row,@"\btable (\S+)");
+            if (!id.Success) continue; // ip omits the main table identifier
+            if (id.Groups[1].Value==table) return false;
+            if (!Regex.IsMatch(id.Groups[1].Value,@"\A(?:[0-9]+|main|local|default)\z")) return false;
+        }
+        return true;
+    }
+    private static async Task<bool> ConfirmEmptyTableAsync(IRouterTransport router,string table,CancellationToken ct)
+    {
+        try {return ProvesEmptyTable(await router.ExecuteAsync("ip -4 route show table all",ct),table);}
+        catch(OperationCanceledException){throw;}
+        catch{return false;}
+    }
     public static async Task<bool> EarlierRulesSafeAsync(IRouterTransport router, string rules, string selectedRule, int priority, uint mark, string active, CancellationToken ct)
     {
         if (rules.Split('\n').Count(line => line == selectedRule) != 1) return false;
+        VerifiedLanLink? lan = null;
         foreach (var line in rules.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             var parsed = Regex.Match(line, @"^\s*(\d+):\s+(.*)$");
@@ -47,8 +70,20 @@ public static class RoutingProtection
             string routes;
             try { routes = await router.ExecuteAsync("ip -4 route show table " + lookup.Groups[1].Value, ct); }
             catch (OperationCanceledException) { throw; }
-            catch { throw new SafeFailure("Required earlier routing-table evidence is unavailable. Kill-switch routing safety cannot be established."); }
-            if (!SafeRoutes(routes, active, lookup.Groups[2].Success)) return false;
+            catch {
+                if (await ConfirmEmptyTableAsync(router,lookup.Groups[1].Value,ct)) continue;
+                throw new SafeFailure($"Earlier RPDB priority {p} lookup requires table evidence: a complete readable table dump did not establish an empty lookup. Selected marked traffic could be affected.");
+            }
+            if (!SafeRoutes(routes, active, lookup.Groups[2].Success))
+            {
+                try { lan ??= await new RouterInspection(router,new KillSwitchVerifier()).LanLinkAsync(ct); }
+                catch(OperationCanceledException){throw;}
+                catch {throw new SafeFailure($"Earlier RPDB priority {p}: local-only LAN evidence could not be established for a non-VPN route.");}
+                if (!SafeRoutes(routes, active, lookup.Groups[2].Success, lan))
+                    throw new SafeFailure($"Earlier RPDB priority {p} lookup can use a WAN, unverified or unsupported route before the selected VPN table. " +
+                        (lookup.Groups[2].Success ? "suppress_prefixlength 0 excludes default routes, not more-specific routes. " : "") +
+                        "Only positively verified directly connected LAN routes are exempt.");
+            }
         }
         return true;
     }

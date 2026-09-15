@@ -16,7 +16,7 @@ public sealed class ReadOnlyTransport(IRouterTransport inner) : IRouterTransport
         "sha256sum /usr/bin/rtp2.sh | awk '{print $1}'",
         "test \"$(grep -Fxc 'cmd=\"$1\";shift' /usr/bin/rtp2.sh)\" = 1 && sh -n /usr/bin/rtp2.sh",
         "uci -q get route_policy.gl_process_vpn", "uci -q get glipv6.globals.enabled || true",
-        "ip -4 rule show", "ip -4 neigh show", "ip -o -4 addr show | awk '{print $4}'",
+        "ip -4 rule show", "ip -4 neigh show", "ip -o -4 addr show", "ip -o -4 addr show | awk '{print $4}'",
         "if [ -r /tmp/dhcp.leases ]; then cat /tmp/dhcp.leases; fi",
         "crontab -l 2>/dev/null || true", "date +%s", "sh -n /usr/bin/rtp2.sh",
         "grep -Fc '# vpn-watch GL reconciliation guard v1' /usr/bin/rtp2.sh || true",

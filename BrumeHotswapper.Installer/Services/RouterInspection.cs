@@ -80,10 +80,17 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         if (!IsPolicyIdentifier(id)) throw new SafeFailure("An unsupported router identifier was returned.");
         return id.StartsWith('@') ? ConfigurationGenerator.Quote(id) : id;
     }
+    private async Task<(string Address,string Mask)> LanAddressAsync(CancellationToken ct) =>
+        ((await router.ExecuteAsync("uci -q get network.lan.ipaddr",ct)).Trim(),
+         (await router.ExecuteAsync("uci -q get network.lan.netmask",ct)).Trim());
+    public async Task<VerifiedLanLink> LanLinkAsync(CancellationToken ct)
+    {
+        var (address,mask)=await LanAddressAsync(ct);
+        return VerifiedLanLink.Discover(address,mask,await router.ExecuteAsync("ip -o -4 addr show",ct));
+    }
     public async Task<LanInventory> LanAsync(CancellationToken ct)
     {
-        string address = (await router.ExecuteAsync("uci -q get network.lan.ipaddr", ct)).Trim();
-        string mask = (await router.ExecuteAsync("uci -q get network.lan.netmask", ct)).Trim();
+        var (address, mask) = await LanAddressAsync(ct);
         string start = (await router.ExecuteAsync("uci -q get dhcp.lan.start", ct)).Trim();
         string limit = (await router.ExecuteAsync("uci -q get dhcp.lan.limit", ct)).Trim();
         if (!System.Net.IPAddress.TryParse(address, out var lanAddress) || lanAddress.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork ||
