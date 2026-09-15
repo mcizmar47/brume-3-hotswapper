@@ -1,7 +1,6 @@
 #!/bin/sh
 
-TARGET_IP="192.168.8.107"
-TARGET_MAC="10:ff:e0:82:c8:96"
+GUARD_FILE="/root/reboot-guards.tsv"
 STATE_FILE="/root/.conditional-reboot-last-date"
 TAG="conditional-reboot"
 
@@ -31,34 +30,35 @@ if [ "$MODE" != "--force" ]; then
         exit 0
     fi
 
-    # Try ping first. This may fail if Windows blocks ICMP.
-    if ping -c 2 -W 2 "$TARGET_IP" >/dev/null 2>&1; then
-        logger -t "$TAG" "DESKTOP-EII167B responded to ping; reboot postponed."
-        [ "$MODE" = "--test" ] && echo "DESKTOP-EII167B responded to ping; WOULD postpone."
-        exit 0
-    fi
-
-    # The failed/blocked ICMP attempt above still forces Linux to refresh ARP/
-    # neighbour resolution. If the expected MAC is known and the neighbour is
-    # not explicitly FAILED/INCOMPLETE, be conservative and treat the PC as
-    # present. A false positive merely postpones the reboot until the next hour.
-    NEIGH="$(ip neigh show "$TARGET_IP")"
-
-    if echo "$NEIGH" | grep -Fqi "$TARGET_MAC" && \
-       ! echo "$NEIGH" | grep -Eq 'FAILED|INCOMPLETE'; then
-        logger -t "$TAG" "DESKTOP-EII167B MAC detected on LAN (neigh: $NEIGH); reboot postponed."
-        [ "$MODE" = "--test" ] && echo "DESKTOP-EII167B MAC detected on LAN; WOULD postpone. [$NEIGH]"
-        exit 0
-    fi
-
+    # A missing, unreadable or malformed guard file postpones reboot.
+    # An explicitly empty file represents zero protected devices.
+    [ -r "$GUARD_FILE" ] || { logger -t "$TAG" "Guard configuration unavailable; postponing."; exit 1; }
+    awk -F '\t' '
+        NF != 2 || $1 !~ /^[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]$/ {bad=1}
+        {n=split($2,a,"."); if(n!=4) bad=1; for(i=1;i<=n;i++) if(a[i] !~ /^[0-9]+$/ || a[i]>255) bad=1}
+        END {exit bad}
+    ' "$GUARD_FILE" || { logger -t "$TAG" "Invalid guard configuration; postponing."; exit 1; }
+    while IFS="$(printf '\t')" read -r TARGET_MAC TARGET_IP; do
+        if ping -c 2 -W 2 "$TARGET_IP" >/dev/null 2>&1; then
+            logger -t "$TAG" "Protected device responded; reboot postponed."
+            [ "$MODE" = "--test" ] && echo "Protected device responded; WOULD postpone."
+            exit 0
+        fi
+        # A failed ICMP probe refreshes ARP. Unknown/error state is conservative.
+        NEIGH="$(ip neigh show "$TARGET_IP")" || { logger -t "$TAG" "Neighbour lookup failed; postponing."; exit 1; }
+        if echo "$NEIGH" | grep -Fqi "$TARGET_MAC" && ! echo "$NEIGH" | grep -Eq 'FAILED|INCOMPLETE'; then
+            logger -t "$TAG" "Protected MAC detected; reboot postponed."
+            [ "$MODE" = "--test" ] && echo "Protected MAC detected; WOULD postpone."
+            exit 0
+        fi
+    done < "$GUARD_FILE"
     if [ "$MODE" = "--test" ]; then
-        logger -t "$TAG" "DESKTOP-EII167B not detected; WOULD reboot."
-        echo "DESKTOP-EII167B not detected; WOULD reboot."
+        echo "No protected device detected; WOULD reboot."
         exit 0
     fi
 else
-    logger -t "$TAG" "FORCE mode requested; bypassing daily marker and desktop-presence checks."
-    echo "FORCE mode: bypassing daily marker and desktop-presence checks."
+    logger -t "$TAG" "FORCE mode requested; bypassing daily marker and protected-device presence checks."
+    echo "FORCE mode: bypassing daily marker and protected-device presence checks."
 fi
 
 # Before reboot, give a sticky Tier 2 session one deliberate chance to return
@@ -125,7 +125,7 @@ if [ "$MODE" = "--force" ]; then
     logger -t "$TAG" "FORCE mode: pre-reboot VPN handling finished; rebooting router."
     echo "FORCE mode: pre-reboot VPN handling finished; rebooting router."
 else
-    logger -t "$TAG" "DESKTOP-EII167B not detected; rebooting router."
+    logger -t "$TAG" "No protected device detected; rebooting router."
 fi
 
 /sbin/reboot

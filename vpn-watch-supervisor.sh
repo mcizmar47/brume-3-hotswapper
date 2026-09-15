@@ -6,7 +6,13 @@ LOCK_DIR="$RUNTIME_DIR/lock"
 PID_FILE="$LOCK_DIR/pid"
 TAG="vpn-watch-supervisor"
 
+# Installer owns replacement/startup while this lock exists; cron waits.
+[ -d /tmp/vpn-watch-installer-lock ] && [ "${1:-}" != "--installer" ] && exit 0
 mkdir -p "$RUNTIME_DIR"
+# Serialize supervisor launches. A stale startup lock requires inspection rather
+# than deleting another process's daemon lock during a startup race.
+mkdir "$RUNTIME_DIR/supervisor-start" 2>/dev/null || exit 0
+trap 'rmdir "$RUNTIME_DIR/supervisor-start" 2>/dev/null' EXIT INT TERM
 
 pid_is_our_daemon() {
     local pid="$1" cmd=""
@@ -26,7 +32,7 @@ if [ -f "$PID_FILE" ]; then
     fi
 fi
 
-rm -rf "$LOCK_DIR" 2>/dev/null
+# The watchdog owns stale daemon-lock recovery; the supervisor must not delete it.
 logger -t "$TAG" "vpn-watch is not running; starting daemon" 2>/dev/null || true
 
 (

@@ -1,0 +1,9 @@
+.vs/
+**/bin/
+**/obj/
+*.user
+*.log
+**/vpn-watch.conf
+**/reboot-guards.tsv
+TestResults/
+artifacts/

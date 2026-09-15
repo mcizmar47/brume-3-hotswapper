@@ -6,9 +6,9 @@
 # - one RECOVERY slot for probing better tiers
 #
 # User-facing major tiers:
-#   1 Croatia/Zagreb
-#   2 Europe: Austria/Vienna -> Spain/Barcelona -> Norway/Oslo -> Malta/Valletta
-#   3 Last-resort: New York -> Boston -> Ashburn -> Israel/Tel Aviv
+#   1 Preferred locations from generated configuration
+#   2 Ordered sticky fallback locations
+#   3 Ordered last-resort locations
 #
 # Recovery policy:
 #   - Tier 1: sticky; no recovery work
@@ -21,9 +21,9 @@
 # v14.1: v14 guarded fastpath with detailed promotion timing disabled by default.
 # Set DEBUG_TIMING=1 in /root/vpn-watch.conf to restore promotion-timing.log writes.
 
-TUNNEL_ID="5779"
-GROUP_ID="10004"
-PROFILE_FILE="/etc/vpn_profiles.d/profile${TUNNEL_ID}"
+TUNNEL_ID=""
+GROUP_ID=""
+LOCATION_FILE="/root/vpn-watch-locations.tsv"
 SLOTS="wgclient1 wgclient2 wgclient3"
 
 PERSIST_DIR="/root/.vpn-watch"
@@ -65,6 +65,19 @@ NTFY_URL=""
 DEBUG_TIMING=0
 
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+# Installer data is mandatory. No developer-specific fallback configuration.
+case "$TUNNEL_ID:$GROUP_ID" in *[!0-9:]*|:*|*:) echo "Invalid VPN IDs" >&2; exit 1;; esac
+PROFILE_FILE="/etc/vpn_profiles.d/profile${TUNNEL_ID}"
+# TSV: rank, major tier, order, identity, display label, peer ID.
+# Reject malformed/duplicate mappings before any runtime work.
+awk -F '\t' '
+    NF != 6 || $1 !~ /^[1-9][0-9]*$/ || $2 !~ /^[123]$/ || $3 !~ /^[1-9][0-9]*$/ || $4 !~ /^[a-f0-9]+$/ || $5 == "" || $6 !~ /^[0-9]+$/ { bad=1 }
+    seen[$6]++ { bad=1 }
+    ($1 in tiers) && (tiers[$1] != $2 || ids[$1] != $4 || orders[$1] != $3 || labels[$1] != $5) { bad=1 }
+    { tiers[$1]=$2; ids[$1]=$4; orders[$1]=$3; labels[$1]=$5; if ($2 == 1) preferred=1 }
+    END { if (bad || !NR || !preferred) exit 1 }
+' "$LOCATION_FILE" || { echo "Invalid location configuration" >&2; exit 1; }
 
 mkdir -p "$PERSIST_DIR" "$RUNTIME_DIR"
 
@@ -112,7 +125,14 @@ notify() {
         log "ntfy skipped: NTFY_URL is not configured"
         return 2
     fi
-    curl -fsS -m 8 -H "Title: $title" -d "$body" "$NTFY_URL" >/dev/null 2>&1
+    # Feed the private URL on stdin rather than exposing the topic in argv.
+    # Configuration generation rejects controls; reject them here as well.
+    if printf '%s' "$NTFY_URL" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+        log "ntfy URL contains invalid controls"
+        return 1
+    fi
+    printf 'url = "%s"\n' "$(printf '%s' "$NTFY_URL" | sed 's/\\/\\\\/g; s/"/\\"/g')" | \
+        curl -fsS -m 8 -H "Title: $title" -d "$body" --config - >/dev/null 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then
         log "ntfy delivery failed rc=$rc title=$title"
@@ -180,94 +200,25 @@ peer_location() {
     uci -q get wireguard."peer_$1".location 2>/dev/null
 }
 
-# Case-insensitive tolerant substring classifier.
-# Uses fixed-string grep instead of shell pattern/lowercase assumptions so it
-# behaves consistently on BusyBox ash.
-contains_ci() {
-    local haystack="$1" needle="$2"
-    printf '%s\n' "$haystack" | grep -Fqi -- "$needle"
-}
-
+# Exact peer membership from installer-generated data; labels never control routing.
 peer_rank() {
-    local loc
-    loc="$(peer_location "$1" 2>/dev/null)"
-
-    if contains_ci "$loc" "croatia" || contains_ci "$loc" "zagreb"; then
-        echo 100
-    elif contains_ci "$loc" "austria" || contains_ci "$loc" "vienna"; then
-        echo 210
-    elif contains_ci "$loc" "spain" || contains_ci "$loc" "barcelona"; then
-        echo 220
-    elif contains_ci "$loc" "norway" || contains_ci "$loc" "oslo"; then
-        echo 230
-    elif contains_ci "$loc" "malta" || contains_ci "$loc" "valletta"; then
-        echo 240
-
-    # US groups intentionally match only city/state/area terms.
-    elif contains_ci "$loc" "new york"; then
-        echo 310
-    elif contains_ci "$loc" "boston" || contains_ci "$loc" "massachusetts"; then
-        echo 320
-    elif contains_ci "$loc" "ashburn" || contains_ci "$loc" "virginia"; then
-        echo 330
-
-    elif contains_ci "$loc" "israel" || contains_ci "$loc" "tel aviv"; then
-        echo 340
-    else
-        echo 0
-    fi
+    awk -F '\t' -v peer="$1" '$6 == peer { print $1; found=1; exit } END { if (!found) print 0 }' "$LOCATION_FILE"
 }
-
-peer_tier() {
-    local rank
-    rank="$(peer_rank "$1")"
-    case "$rank" in
-        100) echo 1 ;;
-        2??) echo 2 ;;
-        3??) echo 3 ;;
-        *) echo 0 ;;
-    esac
-}
-
-
-
+peer_tier() { rank_major_tier "$(peer_rank "$1")"; }
 rank_major_tier() {
-    case "$1" in
-        100) echo 1 ;;
-        2??) echo 2 ;;
-        3??) echo 3 ;;
-        *) echo 0 ;;
-    esac
+    awk -F '\t' -v rank="$1" '$1 == rank { print $2; found=1; exit } END { if (!found) print 0 }' "$LOCATION_FILE"
 }
-
-
-
 tier_label() {
-    case "$1" in
-        1) echo "Croatia" ;;
-        2) echo "Europe" ;;
-        3) echo "Tier 3 fallback" ;;
-        *) echo "Unknown" ;;
-    esac
+    case "$1" in 1|2|3) echo "Tier $1";; *) echo "Unknown";; esac
 }
-
 rank_label() {
-    case "$1" in
-        100) echo "Croatia/Zagreb" ;;
-        210) echo "Austria/Vienna" ;;
-        220) echo "Spain/Barcelona" ;;
-        230) echo "Norway/Oslo" ;;
-        240) echo "Malta/Valletta" ;;
-        310) echo "United States/New York" ;;
-        320) echo "United States/Boston" ;;
-        330) echo "United States/Ashburn" ;;
-        340) echo "Israel/Tel Aviv" ;;
-        *) echo "Unknown" ;;
-    esac
+    awk -F '\t' -v rank="$1" '$1 == rank { print $5; exit }' "$LOCATION_FILE"
 }
-
 rank_order() {
-    echo "100 210 220 230 240 310 320 330 340"
+    cut -f1 "$LOCATION_FILE" | sort -nu
+}
+tier1_ranks() {
+    awk -F '\t' '$2 == 1 {print $1}' "$LOCATION_FILE" | sort -nu
 }
 
 active_iface() {
@@ -499,7 +450,7 @@ prepare_iface() {
         return 3
     fi
     if [ "$rc" -ne 0 ]; then
-        log "setup_instance generate failed for $iface peer=$peer: $out"
+        log "setup_instance generate failed for $iface peer=$peer (provider output withheld)"
         teardown_iface "$iface" >/dev/null 2>&1 || true
         return 1
     fi
@@ -517,7 +468,7 @@ prepare_iface() {
         return 3
     fi
     if [ "$rc" -ne 0 ]; then
-        log "setup_instance start failed for $iface peer=$peer: $out"
+        log "setup_instance start failed for $iface peer=$peer (provider output withheld)"
         teardown_iface "$iface" >/dev/null 2>&1 || true
         return 1
     fi
@@ -951,8 +902,8 @@ promote_iface() {
         fi
 
         case "$new_tier" in
-            1) body="Croatia gateway in use: $name ($loc)." ;;
-            2) body="European gateway in use: $name ($loc)." ;;
+            1) body="Preferred gateway in use: $name ($loc)." ;;
+            2) body="Fallback gateway in use: $name ($loc)." ;;
             3) body="Last-resort gateway in use: $name ($loc)." ;;
             *) body="VPN gateway changed: $name ($loc)." ;;
         esac
@@ -1133,7 +1084,7 @@ probe_recovery_targets() {
     standby_peer="$(iface_peer "$standby" 2>/dev/null)"
 
     # Best-to-worst recovery targets:
-    # Croatia, then Austria/Spain/Norway/Malta.
+    # Configured Tier 1 locations, then configured Tier 2 locations.
     # Tier-3-to-Tier-3 "improvements" are intentionally ignored.
     for rank in $(recovery_ranks "$ar"); do
         peer="$(next_peer_for_rank "$rank" "$ap" "$standby_peer" "")"
@@ -1258,7 +1209,7 @@ EOF
 
     # Recovery policy is intentionally sticky:
     # - Tier 1: no recovery work
-    # - Tier 2: no recovery to Croatia and no same-tier "upgrades"
+    # - Tier 2: no upward recovery and no same-tier "upgrades"
     # - Tier 3: probe only Tier 1 and Tier 2, best-to-worst
     probe_recovery_targets "$active" "$ap" "$ar" "$at" "$standby" "$recovery"
     rc=$?
@@ -1290,7 +1241,7 @@ EOF
 
 pre_reboot_recover_core() {
     local roles active ap ar at standby recovery target_rank
-    local existing peer rc tries=0
+    local existing peer rc tries=0 preferred_rank
 
     roles="$(reconcile_roles)"
     IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
@@ -1311,8 +1262,10 @@ EOF
 
     log "PRE-REBOOT: Tier 2 active ($(iface_summary "$active")); attempting one deliberate recovery to Tier 1"
 
-    # Reuse an already-live Croatia tunnel if one happens to exist.
-    existing="$(find_healthy_iface_for_rank 100 "$active" 2>/dev/null)"
+    for preferred_rank in $(tier1_ranks); do
+    tries=0
+    # Reuse an already-live configured Tier 1 tunnel if available.
+    existing="$(find_healthy_iface_for_rank "$preferred_rank" "$active" 2>/dev/null)"
     if [ -n "$existing" ]; then
         peer="$(iface_peer "$existing" 2>/dev/null)"
         if promote_iface "$existing" "$peer" "pre-reboot-tier1-recovery"; then
@@ -1340,7 +1293,7 @@ EOF
     fi
 
     while [ "$tries" -lt "$STANDBY_ATTEMPTS" ]; do
-        peer="$(next_peer_for_rank 100 "$ap" "$(iface_peer "$standby" 2>/dev/null)" "")" || break
+        peer="$(next_peer_for_rank "$preferred_rank" "$ap" "$(iface_peer "$standby" 2>/dev/null)" "")" || break
 
         prepare_iface "$recovery" "$peer" "pre-reboot-recovery"
         rc=$?
@@ -1372,7 +1325,8 @@ EOF
         tries=$((tries + 1))
     done
 
-    log "PRE-REBOOT: Tier 1 recovery attempt finished without a working Croatia tunnel"
+    done
+    log "PRE-REBOOT: Tier 1 recovery attempt finished without a working preferred tunnel"
     echo "PRE-REBOOT: Tier 1 recovery attempt failed."
     return 1
 }
@@ -1521,7 +1475,7 @@ EOF
 
     # Synthetic failure is over. Run the ordinary post-failover management
     # cycle. Tier 2 remains sticky by policy, so this should rebuild the next
-    # lower fallback without recovering back to Croatia.
+    # lower fallback without automatically returning to the preferred tier.
     rm -f "$LAST_RECOVERY_FILE"
     sleep 2
 

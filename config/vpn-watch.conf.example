@@ -1,1 +1,7 @@
-NTFY_URL="https://ntfy.sh/REPLACE_WITH_PRIVATE_TOPIC"
+# Private router file: /root/vpn-watch.conf, root-owned, mode 600.
+# Discover these IDs from the selected route policy. Empty IDs fail closed.
+TUNNEL_ID=''
+GROUP_ID=''
+NTFY_URL=''
+# Required companion data: /root/vpn-watch-locations.tsv and /root/reboot-guards.tsv.
+# See ../docs/installer.md for the TSV contracts and migration requirements.
