@@ -1,26 +1,11 @@
-# RPDB LAN exception: resolved policy
+# Selected GL policy preservation
 
-The project explicitly permits verified local/router and directly connected LAN traffic outside the VPN. Selected VPN traffic must not escape through a non-VPN WAN/Internet path before reaching the selected VPN table.
+Hotswapper preserves the selected GL.iNet VPN policy, including either kill-switch setting. It verifies routing/firewall integration required for safe tunnel promotion; it does not certify the router's complete network-security policy.
 
-## Shared production rule
+The shared verifier reads the existing setting and always validates selected mark/ACTIVE slot/table and VPN routes. When enabled it additionally checks paired GL MARK/DROP scope, chain attachment and selected-table terminal protection. Disabled is supported and informational. No installer or runtime path writes the kill-switch setting.
 
-The earlier-table verifier first applies existing Linux default-suppression and terminal-result handling. If a remaining route needs a LAN exception, it uses RouterInspection's shared network.lan.ipaddr/netmask reads and the current `ip -o -4 addr show` output. Exactly one kernel interface must own that configured address/prefix.
+Unrelated RPDB lookups and LAN routes are outside this boundary. The universal earlier-table audit, empty-table proof and VerifiedLanLink exception machinery were removed. No suppress_prefixlength semantics are reinterpreted or routing rules changed.
 
-The exception requires the exact configured connected subnet, that verified interface, `proto kernel scope link`, and the verified local source address. A gateway, default, external subnet, unknown interface, unsupported route attributes, missing/ambiguous address evidence or mismatched source cannot qualify. No table number, subnet, router address or LAN interface name is hardcoded.
+IPv6 independently must be disabled because the existing promotion path updates IPv4 tables and firewall rules only. Turning the kill switch off does not waive this prerequisite.
 
-The LAN exception is used only for earlier lookups. Layers A/B and selected VPN-table verification are unchanged: the selected table still needs its expected wgclient default and terminal protection. An unsuppressed WAN default blocks; a default suppressed by suppress_prefixlength 0 still falls through according to Linux semantics.
-
-## Empty earlier table
-
-A failed individual table dump still requires successful complete-dump evidence before an earlier numeric table can be treated as empty. Failed or ambiguous evidence never grants safety. This remains the fix for the previously unavailable empty lookup.
-
-## Resolved findings and validation
-
-The user verified that the earlier connected route is the LAN route and explicitly authorized local LAN access as an intentional exception. The previous strict-policy LAN block is therefore superseded by this semantic rule. No router connection or mutation occurred during implementation.
-
-- 179 .NET Release tests passed, zero failed/skipped.
-- Focused tests include the observed LAN shape and a different subnet/interface/table, WAN default and specific external routes, unknown interfaces, gateways, unsupported attributes, ambiguous/missing kernel evidence, suppression behavior and unchanged selected-table requirements.
-- Shell/Python regressions passed, including historical fastpath hashes.
-- Release installer and diagnostic helper builds succeeded with zero warnings/errors.
-
-The normal installer uses this shared verifier before Review and again before writes. No known genuine installation blocker remains from the supplied evidence. Normal installation still revalidates current state and fails closed if required evidence changes or is unavailable. No additional standalone preflight development cycle is proposed.
+Policy/profile agreement, runtime slot ownership, firmware compatibility, upload, transaction, rollback and generated configuration checks remain mandatory. Runtime promotion and rollback update only selected peer/group/interface/mark metadata; their proven implementation is unchanged.

@@ -45,15 +45,7 @@ public sealed partial class Runner(SshRouterSession session, Action<Check> repor
                 Add("Profile membership", profile.Connections.All(p => entries.Contains(profile.GroupId + "_" + p.PeerId)), "Compared all discovered peers against live group_peer membership.");
             });
             await Step("Slot ownership", async () => await SlotsAsync(profile, ct));
-            await Step("Kill-switch verifier", async () => { await new KillSwitchVerifier().VerifyAsync(read, profile.PolicySection, ct); Add("Kill-switch verifier", true, "Real verifier accepted configured intent, MARK/DROP scope, chain attachment, selected-mark terminal routing and IPv6 prerequisites."); });
-            await Step("Kill-switch observations", async () =>
-            {
-                string policy = RouterInspection.Identifier(profile.PolicySection);
-                var intent = (await read.ExecuteAsync($"uci -q get route_policy.{policy}.killswitch || true", ct)).Trim();
-                var ipv6 = (await read.ExecuteAsync("uci -q get glipv6.globals.enabled || true", ct)).Trim();
-                Add("Kill-switch configured intent", intent == "1", intent == "1" ? "Enabled." : "Not verified enabled.");
-                report(new("IPv6 configuration", ipv6 == "0" ? "PASS" : "WARN", ipv6 == "0" ? "Explicitly disabled." : ipv6 == "1" ? "Enabled; current verifier does not accept this layout." : "Missing/nonstandard setting."));
-            });
+            await RoutingDiagnostics.VerifyAsync(read, profile.PolicySection, report, ct);
             await Step("Runtime state", async () => await StateAsync(identity, profile, ct));
         }
         await Step("Daemon count", async () => { int count = (await inspection.DaemonPidsAsync(ct)).Length; Add("Daemon count", count == 1, $"{count} exact watchdog daemon process(es). No process action performed."); });

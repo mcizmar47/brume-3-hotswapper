@@ -1,5 +1,8 @@
 # Live preflight findings and focused follow-up
 
+> Policy update: routing/kill-switch discussion below records earlier work. The current [selected GL policy preservation boundary](rpdb-lan-boundary.md) supersedes universal RPDB checks and supports both kill-switch settings.
+
+
 ## Evidence boundary
 
 The completed read-only run is authoritative for the observations below. This local correction pass did not reconnect, install, run the guard patcher, or mutate the router. The original sanitized report omitted raw SFTP errors, routing rules/tables and individual metadata fields. Those missing facts cannot be reconstructed from a BLOCK label.

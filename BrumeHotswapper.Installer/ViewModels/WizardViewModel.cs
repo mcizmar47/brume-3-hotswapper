@@ -132,7 +132,7 @@ public sealed class WizardViewModel : Observable, IDisposable
             case 7:
                 var c = Configuration(); ConfigurationGenerator.Validate(c);
                 plan = await session!.PlanAsync(c, ct);
-                Review = BuildReview(c) + "\n\nPLANNED CHANGES\n" + string.Join("\n", plan.Changes); break;
+                Review = BuildReview(c) + $"\n\nGL.iNet kill switch: {(plan.Snapshot.KillSwitchEnabled ? "Enabled" : "Disabled — direct WAN fallback is permitted by the current GL.iNet VPN policy")} (preserved)" + "\n\nPLANNED CHANGES\n" + string.Join("\n", plan.Changes); break;
             case 8:
                 var config = Configuration(); ConfigurationGenerator.Validate(config); Progress.Clear(); Page = 9;
                 try

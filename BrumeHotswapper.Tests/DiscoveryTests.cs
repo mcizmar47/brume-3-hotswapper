@@ -37,15 +37,6 @@ public class DiscoveryTests
         if(accepted) await new KillSwitchVerifier().VerifyAsync(router,"vpn",CancellationToken.None);
         else await Assert.ThrowsAsync<SafeFailure>(()=>new KillSwitchVerifier().VerifyAsync(router,"vpn",CancellationToken.None));
     }
-    [Theory]
-    [InlineData("100: from all fwmark 0x1000/0xf000 lookup 2000")]
-    [InlineData("50: not from all fwmark 0x2000/0xf000 lookup 2000")]
-    public async Task AmbiguousOrNegatedEarlierRulesAreRefused(string earlier)
-    {
-        var router = new RouteRouter("default dev wgclient1\nblackhole default metric 254",
-            earlier + "\n100: from all fwmark 0x1000/0xf000 lookup 1001\n");
-        await Assert.ThrowsAsync<SafeFailure>(() => new KillSwitchVerifier().VerifyAsync(router, "vpn", default));
-    }
     private class RouteRouter(string routes, string? customRules = null) : IRouterTransport
     {
         public Task UploadAsync(string p,string c,CancellationToken ct)=>throw new Exception("No writes expected");

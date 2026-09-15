@@ -1,5 +1,8 @@
 # Windows installer: reconciliation pass
 
+The existing GL.iNet kill-switch setting (Enabled or Disabled) is displayed and preserved. Both are supported. IPv6 compatibility is checked independently. See [selected policy preservation](rpdb-lan-boundary.md).
+
+
 ## Operation
 
 Open BrumeHotswapper.slnx from the repository root. Projects and bundled RouterAssets use relative paths. Normal startup uses real discovery; demo data requires --demo. A reviewed plan is revalidated before mutation. Unknown or incompatible firmware is refused. The normal installer runs shared metadata, kill-switch, upload-capability and transaction checks before Review; a standalone preflight is not required. Metadata uses verified ls -ldn, test, wc and sha256sum primitives. See [shared production integration](shared-production-integration.md).

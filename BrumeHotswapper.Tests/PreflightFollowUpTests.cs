@@ -51,19 +51,6 @@ public class PreflightFollowUpTests
         Assert.DoesNotContain(checks, x => x.Status == "BLOCK");
         Assert.Contains(checks, x => x.Detail.Contains("required after installation"));
     }
-    [Fact] public void DiagnosticTableParserDoesNotGrantRoutingCompatibility()
-    {
-        var tables = RoutingEvidence.SelectedTables("6000: from all fwmark 4096/61440 lookup 1001\n6001: not from all fwmark 0x1000/0xf000 lookup 1002\n6002: from all fwmark 0x2000/0xf000 lookup 1003", "0x1000");
-        Assert.Equal(new[] { "1001" }, tables);
-        Assert.True(ReadOnlyTransport.IsAllowed("ip -4 route show table all dev wgclient1"));
-        Assert.False(ReadOnlyTransport.IsAllowed("ip -4 route show table all dev wgclient1; reboot"));
-    }
-    [Fact] public void RoutingEvidenceHidesCommentsAddressesAndProviderSetIds()
-    {
-        string text = RoutingEvidence.Sanitize("-A TUNNEL123_ROUTE_POLICY -s 192.0.2.10 -m comment --comment \"synthetic-secret\" -m set --match-set dst_net123 dst -j DROP");
-        Assert.DoesNotContain("provider", RoutingEvidence.Sanitize("default dev provider123 table provider456\n-A provider789 -j provider999"));
-        Assert.DoesNotContain("synthetic-secret", text); Assert.DoesNotContain("192.0.2.10", text); Assert.DoesNotContain("123", text);
-    }
     [Theory]
     [InlineData(9)] [InlineData(160)] [InlineData(600)]
     public void PoolGenerationKeepsEveryPeerWithoutSmallCountAssumptions(int count)

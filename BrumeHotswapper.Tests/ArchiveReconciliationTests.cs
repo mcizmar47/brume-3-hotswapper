@@ -22,7 +22,6 @@ public class ArchiveReconciliationTests
         { Upload?.Invoke(path); return inner.UploadAsync(path, content, ct); }
     }
     [Theory]
-    [InlineData("0", "", "Enable")]
     [InlineData("1", "", "marking and DROP")]
     public async Task KillSwitchSeparatesIntentFromEnforcement(string enabled, string rules, string message)
     {

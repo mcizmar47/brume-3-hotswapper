@@ -1,5 +1,8 @@
 # Shared production integration correction
 
+> Policy update: routing/kill-switch discussion below records earlier work. The current [selected GL policy preservation boundary](rpdb-lan-boundary.md) supersedes universal RPDB checks and supports both kill-switch settings.
+
+
 This pass used the supplied live evidence and local source/tests only. No router connection or modification occurred. This supersedes earlier assumptions that the target provides a stat command or applet. The historical guard and SSH streaming determinations remain closed and unchanged.
 
 ## Metadata: cause and complete fix

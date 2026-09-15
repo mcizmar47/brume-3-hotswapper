@@ -16,67 +16,6 @@ public class FinalBlockerTests
         Assert.Equal(CompatibilityCatalog.HistoricalPatchedHash, router.FirmwareHash);
     }
     private sealed class AcceptKill : IKillSwitchVerifier { public Task VerifyAsync(IRouterTransport r,string p,CancellationToken ct)=>Task.CompletedTask; }
-    [Theory]
-    [InlineData("6000: from all fwmark 0x8000/0xf000 lookup main", false)]
-    [InlineData("6000: from all fwmark 0x1000/0xf000 lookup 1001", false)]
-    [InlineData("6000: from all fwmark 0x2000/0x3000 lookup 1009", true)]
-    [InlineData("6000: from all fwmark 0x2001/0xffff lookup 1009", true)]
-    [InlineData("6000: not from all fwmark 0/0xf000 lookup main", true)]
-    public void MaskOverlapUsesUnknownBitsConservatively(string rule,bool match) => Assert.Equal(match, RoutingProtection.CanMatch(rule, 0x2000));
-    private const string Selected = "6000: from all fwmark 0x2000/0xf000 lookup 1002";
-    private const string LiveRules = "0: from all lookup local\n1: from all iif lo lookup 16800\n800: from all lookup 9910 suppress_prefixlength 0\n6000: from all fwmark 0x8000/0xf000 lookup main\n" + Selected + "\n6000: from all fwmark 0x1000/0xf000 lookup 1001\n9000: not from all fwmark 0/0xf000 lookup main\n9910: not from all fwmark 0/0xf000 blackhole\n32766: from all lookup main";
-    [Fact] public async Task LiveRuleShapeAcceptsOnlyVerifiedSafeEarlierTables()
-    {
-        var r = new RouteFixture();
-        await new KillSwitchVerifier().VerifyAsync(r, "vpn", default);
-        Assert.Contains("ip -4 route show table 16800", r.Reads);
-        Assert.Contains("ip -4 route show table 9910", r.Reads);
-        r.Earlier = "192.0.2.0/24 dev eth0";
-        await Assert.ThrowsAsync<SafeFailure>(()=>new KillSwitchVerifier().VerifyAsync(r,"vpn",default));
-    }
-    [Theory]
-    [InlineData("6000: from all fwmark 0x2000/0x3000 lookup 1009")]
-    [InlineData("6000: from all fwmark 0x2000/0xf000 lookup 1009")]
-    [InlineData("5000: from all fwmark 0x2000/0xf000 lookup 1009")]
-    public async Task AmbiguousApplicableRulesBlock(string extra)
-    {
-        var r = new RouteFixture { Rules = LiveRules + "\n" + extra };
-        await Assert.ThrowsAsync<SafeFailure>(()=>new KillSwitchVerifier().VerifyAsync(r,"vpn",default));
-    }
-    [Theory]
-    [InlineData("default dev eth0\nblackhole default metric 254")]
-    [InlineData("default dev wgclient2")]
-    [InlineData("default dev wgclient1\nblackhole default metric 254")]
-    [InlineData("blackhole default metric 254")]
-    public async Task UnprotectedOrWrongActiveTableBlocks(string routes)
-    {
-        var r = new RouteFixture { Routes = routes };
-        await Assert.ThrowsAsync<SafeFailure>(()=>new KillSwitchVerifier().VerifyAsync(r,"vpn",default));
-    }
-    private sealed class RouteFixture : IRouterTransport
-    {
-        public string Rules = LiveRules, Earlier = "", Routes = "default dev wgclient2 proto static scope link\nblackhole default proto static metric 254\n192.0.2.0/24 dev wgclient2 proto static scope link";
-        public List<string> Reads = [];
-        public Task UploadAsync(string p,string s,CancellationToken ct)=>throw new Exception("write");
-        public Task<string> ExecuteAsync(string c,CancellationToken ct) {
-            Reads.Add(c);
-            return Task.FromResult(c switch {
-                "ip -4 rule show" => Rules,
-                "ip -4 route show table 1002" => Routes,
-                "ip -4 route show table 1009" => "default dev eth0",
-                "ip -4 route show table 16800" => Earlier,
-                "ip -4 route show table 9910" => "default dev eth0", // suppressed default alone cannot escape
-                "uci -q get route_policy.vpn.killswitch || true" or "uci -q get route_policy.vpn.enabled || true" => "1",
-                "uci -q get glipv6.globals.enabled || true" => "0",
-                "uci -q get route_policy.vpn.tunnel_id" => "42",
-                "uci -q get route_policy.vpn.mark" => "0x2000",
-                "uci -q get route_policy.vpn.via" => "wgclient2",
-                "iptables -w -t mangle -S TUNNEL42_ROUTE_POLICY" => "-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j MARK --set-xmark 0x2000/0xf000\n-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j DROP",
-                var x when x.StartsWith("iptables -w -t mangle -C") => "",
-                _ => throw new Exception("Unexpected read")
-            });
-        }
-    }
     [Fact] public async Task BusyBoxFieldsAreIndependentAndTrimmed()
     {
         var fields = await FileMetadata.ReadAsync(new MetadataFixture(), "/root/vpn-watch.sh", default);

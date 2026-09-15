@@ -15,7 +15,7 @@ public record LanNetwork(string Address, string Netmask, int PoolStart, int Pool
 public record LanInventory(LanNetwork Network, IReadOnlyList<LanClient> Clients, IReadOnlyList<Reservation> Reservations, IReadOnlyList<LanClient>? Observations = null, IReadOnlyList<string>? RouterAddresses = null);
 public record FileState(string Path, string Hash, string Mode, bool Exists);
 public record RouterSnapshot(RouterIdentity Router, string Policy, string ActiveInterface, string ActivePeer,
-    string Cron, LanInventory Lan, IReadOnlyList<FileState> Files, bool WatchdogRunning);
+    string Cron, LanInventory Lan, IReadOnlyList<FileState> Files, bool WatchdogRunning, bool KillSwitchEnabled = true);
 public record InstallationPlan(InstallerConfiguration Configuration, RouterSnapshot Snapshot,
     IReadOnlyList<ReservationChange> Reservations, string DesiredCron, string GuardAction, IReadOnlyList<string> Changes)
 {

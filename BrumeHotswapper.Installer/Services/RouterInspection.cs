@@ -11,52 +11,58 @@ public interface IRouterTransport
 public interface IKillSwitchVerifier { Task VerifyAsync(IRouterTransport router, string policy, CancellationToken ct); }
 public sealed class KillSwitchVerifier : IKillSwitchVerifier
 {
-    // Archive: killswitch=1 preserves marking on interface-down and suppresses WAN failover.
-    // Require both intent and the captured fw3 enforcement shape; terminal routes remain a secondary check.
+    // Preserve the selected GL policy; unrelated routing policy is outside this boundary.
+    public static async Task<bool> ReadEnabledAsync(IRouterTransport router, string policy, CancellationToken ct)
+    {
+        var value = (await router.ExecuteAsync($"uci -q get route_policy.{RouterInspection.Identifier(policy)}.killswitch || true", ct)).Trim();
+        return value switch { "1" => true, "0" => false, _ => throw new SafeFailure("The selected GL kill-switch setting is unavailable or unsupported.") };
+    }
     public async Task VerifyAsync(IRouterTransport router, string policy, CancellationToken ct)
     {
+        bool enabled = await ReadEnabledAsync(router, policy, ct);
         policy = RouterInspection.Identifier(policy);
-        if ((await router.ExecuteAsync($"uci -q get route_policy.{policy}.killswitch || true", ct)).Trim() != "1")
-            throw new SafeFailure("Enable the selected VPN policy's kill switch in the GL panel before installing. The installer does not change this setting.");
         if ((await router.ExecuteAsync($"uci -q get route_policy.{policy}.enabled || true", ct)).Trim() != "1")
             throw new SafeFailure("The selected VPN policy is disabled.");
-        if ((await router.ExecuteAsync("uci -q get glipv6.globals.enabled || true", ct)).Trim() != "0")
-            throw new SafeFailure("IPv6 enforcement needs separate verification. This installer currently verifies the captured IPv4 firewall layout only.");
         var tunnel = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.tunnel_id", ct)).Trim();
         if (!Regex.IsMatch(tunnel, "^[0-9]+$")) throw new SafeFailure("The selected policy has no valid tunnel identifier.");
         var mark = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.mark", ct)).Trim();
-        if (!Regex.IsMatch(mark, "^0x[0-9a-fA-F]{1,8}$")) throw new SafeFailure("The selected VPN policy has no interpretable routing mark. Enable its connection in the GL panel and retry.");
+        if (!Regex.IsMatch(mark, "^0x[0-9a-fA-F]{1,8}$")) throw new SafeFailure("The selected policy has no interpretable routing mark.");
         uint selectedMark = Convert.ToUInt32(mark[2..], 16);
-        if ((selectedMark & 0xf000) == 0 || (selectedMark & ~0xf000u) != 0)
-            throw new SafeFailure("The selected VPN policy uses an unsupported routing mark.");
         var active = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim();
-        if (!new[] { "wgclient1", "wgclient2", "wgclient3" }.Contains(active))
-            throw new SafeFailure("The selected VPN policy is not on a Hotswapper runtime slot.");
-        var chain = "TUNNEL" + tunnel + "_ROUTE_POLICY";
-        var firewall = await router.ExecuteAsync($"iptables -w -t mangle -S {chain}", ct);
-        if (!HasPolicyRules(firewall, chain, mark))
-            throw new SafeFailure("The kill switch is configured, but the selected policy's VPN marking and DROP rules could not be verified.");
-        await router.ExecuteAsync($"iptables -w -t mangle -C ROUTE_POLICY -m addrtype ! --dst-type LOCAL -j {chain}", ct);
+        // Contract used by vpn-watch.sh fastpath_mark_for_iface and fastpath_verify_kernel.
+        if (!new[] { "wgclient1", "wgclient2", "wgclient3" }.Contains(active) || selectedMark != (uint)(active[^1] - '0') * 0x1000)
+            throw new SafeFailure("The selected mark does not match the ACTIVE runtime slot.");
         var rules = await router.ExecuteAsync("ip -4 rule show", ct);
-        int markedRules = 0, recognizedLookups = 0, ambiguousLookups = 0, unsafeTables = 0, missingTerminal = 0;
-        foreach (var rule in rules.Split('\n').Where(l => l.Contains($"fwmark {mark}/0xf000 ")))
+        var selected = rules.Split('\n').Where(l => l.Contains($"fwmark {mark}/0xf000 ") && !Regex.IsMatch(l, @"\bnot\b")).ToArray();
+        string table = "100" + active[^1];
+        if (selected.Length != 1 || !Regex.IsMatch(selected[0], $@"^\s*\d+:\s+from all fwmark {Regex.Escape(mark)}/0xf000 lookup {table}\s*$"))
+            throw new SafeFailure("The selected mark does not uniquely map to the expected ACTIVE routing table.");
+        var routes = await router.ExecuteAsync($"ip -4 route show table {table}", ct);
+        var defaults = routes.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("default ")).ToArray();
+        // Unconditional: OFF never waives ACTIVE routing correctness.
+        if (defaults.Length != 1 || !Regex.IsMatch(defaults[0], $@"^default dev {Regex.Escape(active)}(?: |$)") || !SelectedRoutesSafe(routes, active))
+            throw new SafeFailure("The selected routing table does not route through the expected ACTIVE WireGuard interface.");
+        if (enabled)
         {
-            markedRules++;
-            var table = Regex.Match(rule, $@"^\s*(\d+):\s+from all fwmark {Regex.Escape(mark)}/0xf000 lookup (\d+)\s*$");
-            if (!table.Success || int.Parse(table.Groups[1].Value) >= 32766) continue;
-            recognizedLookups++;
-            int priority = int.Parse(table.Groups[1].Value);
-            bool ambiguousEarlier = !await RoutingProtection.EarlierRulesSafeAsync(router, rules, rule, priority, selectedMark, active, ct);
-            if (ambiguousEarlier) { ambiguousLookups++; continue; }
-            var routes = await router.ExecuteAsync($"ip -4 route show table {table.Groups[2].Value}", ct);
-            var defaults = routes.Split('\n').Where(l => l.StartsWith("default ")).ToArray();
-            if (!RoutingProtection.SafeRoutes(routes, active) || defaults.Length != 1 ||
-                !Regex.IsMatch(defaults[0], $@"\bdev {Regex.Escape(active)}(?: |$)")) { unsafeTables++; continue; }
-            if (routes.Split('\n').Any(l => Regex.IsMatch(l.Trim(), @"^(unreachable|blackhole|prohibit) default(?: |$)"))) return;
-            missingTerminal++;
+            var chain = "TUNNEL" + tunnel + "_ROUTE_POLICY";
+            var firewall = await router.ExecuteAsync($"iptables -w -t mangle -S {chain}", ct);
+            if (!HasPolicyRules(firewall, chain, mark))
+                throw new SafeFailure("The kill switch is configured, but the selected policy's VPN marking and DROP rules could not be verified.");
+            await router.ExecuteAsync($"iptables -w -t mangle -C ROUTE_POLICY -m addrtype ! --dst-type LOCAL -j {chain}", ct);
+            if (!routes.Split('\n').Any(l => Regex.IsMatch(l.Trim(), @"^(unreachable|blackhole|prohibit) default(?: |$)")))
+                throw new SafeFailure("The enabled GL kill switch has no terminal protection in the selected VPN table.");
         }
-        throw new SafeFailure("The selected policy's kill-switch enforcement could not be verified: the selected mark has no unambiguous terminal VPN route. Keep the GL kill switch enabled; this runtime layout needs review. " +
-            $"Routing diagnostics: marked rules={markedRules}, recognized numeric lookups={recognizedLookups}, ambiguous precedence={ambiguousLookups}, non-VPN/unsupported tables={unsafeTables}, terminal defaults absent={missingTerminal}.");
+    }
+    private static bool SelectedRoutesSafe(string routes, string active)
+    {
+        foreach (var line in routes.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Trim()))
+        {
+            if (Regex.IsMatch(line, @"^(unreachable|blackhole|prohibit|local|broadcast) ")) continue;
+            if (Regex.IsMatch(line, @"^(throw|unicast|nat|multicast) ") ||
+                !Regex.IsMatch(line, $@"\bdev {Regex.Escape(active)}(?: |$)") ||
+                Regex.IsMatch(line, @"\b(via|nexthop|encap)\b")) return false;
+        }
+        return true;
     }
     public static bool HasPolicyRules(string output, string chain, string mark)
     {
@@ -83,11 +89,6 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
     private async Task<(string Address,string Mask)> LanAddressAsync(CancellationToken ct) =>
         ((await router.ExecuteAsync("uci -q get network.lan.ipaddr",ct)).Trim(),
          (await router.ExecuteAsync("uci -q get network.lan.netmask",ct)).Trim());
-    public async Task<VerifiedLanLink> LanLinkAsync(CancellationToken ct)
-    {
-        var (address,mask)=await LanAddressAsync(ct);
-        return VerifiedLanLink.Discover(address,mask,await router.ExecuteAsync("ip -o -4 addr show",ct));
-    }
     public async Task<LanInventory> LanAsync(CancellationToken ct)
     {
         var (address, mask) = await LanAddressAsync(ct);
@@ -196,7 +197,9 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
                 throw new SafeFailure("VPN pool membership changed. Discover VPN lists again.");
             await router.ExecuteAsync($"grep -Fxq '{c.Profile.GroupId}_{peer.PeerId}' /etc/vpn_profiles.d/profile{tunnel}", ct);
         }
+        await Ipv6Compatibility.VerifyAsync(router, ct);
         await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
+        bool killSwitchEnabled = await KillSwitchVerifier.ReadEnabledAsync(router, c.Profile.PolicySection, ct);
         await router.ExecuteAsync("test -z \"$(uci changes dhcp)\"", ct);
         var files = new List<FileState>();
         foreach (var path in DeploymentPlanning.Paths)
@@ -207,7 +210,7 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         _ = CronPlanner.Generate(cron, c.Maintenance);
         var pids = await DaemonPidsAsync(ct);
         if (pids.Length > 1) throw new SafeFailure("Multiple Hotswapper daemons are running. Stop the duplicates before installation.");
-        return new(live, c.Profile.PolicySection, active, activePeer, cron, (c.Guards.Count > 0 ? await LanAsync(ct) : new LanInventory(new("0.0.0.0", "0.0.0.0", 0, 0), [], [])), files, pids.Length == 1);
+        return new(live, c.Profile.PolicySection, active, activePeer, cron, (c.Guards.Count > 0 ? await LanAsync(ct) : new LanInventory(new("0.0.0.0", "0.0.0.0", 0, 0), [], [])), files, pids.Length == 1, killSwitchEnabled);
     }
     public async Task<string[]> DaemonPidsAsync(CancellationToken ct)
     {

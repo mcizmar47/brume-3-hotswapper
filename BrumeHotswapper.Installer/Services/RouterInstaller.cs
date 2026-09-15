@@ -25,7 +25,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
         var refreshed = DeploymentPlanning.Create(c, fresh);
         if (!fresh.Files.SequenceEqual(plan.Snapshot.Files) || fresh.Cron != plan.Snapshot.Cron ||
             !refreshed.Reservations.SequenceEqual(plan.Reservations) || fresh.ActivePeer != plan.Snapshot.ActivePeer ||
-            fresh.ActiveInterface != plan.Snapshot.ActiveInterface)
+            fresh.ActiveInterface != plan.Snapshot.ActiveInterface || fresh.KillSwitchEnabled != plan.Snapshot.KillSwitchEnabled)
             throw new SafeFailure("Router settings changed after Review. Return to the maintenance page and review a fresh plan.");
         var content = new Dictionary<string, string>
         {
@@ -249,6 +249,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             await router.ExecuteAsync($"wg show {iface} latest-handshakes | awk -v now=\"$(date +%s)\" '$2 > 0 && now-$2 <= 75 {{ok=1}} END {{exit !ok}}'", ct);
         foreach (var peer in c.Tiers.Where(t => t.Tier > 0).SelectMany(t => t.Locations).SelectMany(g => g.Connections))
             await router.ExecuteAsync($"test \"$(uci -q get wireguard.peer_{peer.PeerId}.group_id)\" = {Q(c.Profile.GroupId)} && grep -Fxq '{c.Profile.GroupId}_{peer.PeerId}' /etc/vpn_profiles.d/profile{c.Profile.TunnelId}", ct);
+        await Ipv6Compatibility.VerifyAsync(router, ct);
         await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
         // A real router-side delivery test is part of the explicitly enabled notification configuration.
         if (c.Notifications) await router.ExecuteAsync("/root/vpn-watch.sh notify_test", ct);

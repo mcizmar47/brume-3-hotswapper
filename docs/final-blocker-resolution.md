@@ -1,5 +1,8 @@
 # Final blocker resolution
 
+> Policy update: routing/kill-switch discussion below records earlier work. The current [selected GL policy preservation boundary](rpdb-lan-boundary.md) supersedes universal RPDB checks and supports both kill-switch settings.
+
+
 This pass made local changes only. No router connection, preflight, installation or router mutation was performed. This document supersedes the unresolved conclusions in the earlier investigation reports.
 
 ## Guard: historical variant proved

@@ -88,6 +88,46 @@ with tempfile.TemporaryDirectory(prefix="brume-shell-") as directory:
     assert 'WOULD postpone' in run(guard_prefix + stale_neighbor + guard_checks)
     run(guard_prefix + 'ping() { return 1; }\nip() { return 1; }\n' + guard_checks, 1)
 
+# Execute the real promotion and rollback functions with synthetic UCI and no system effects.
+# A strict UCI stub accepts only the four metadata fields owned by Hotswapper.
+promotion = '\n'.join(function(n) for n in ['promote_iface', 'fastpath_rollback', 'restore_policy_metadata', 'fastpath_mark_for_iface'])
+stubs = r"""
+GROUP_ID=7
+peer_id=11; group_id=7; via=wgclient1; mark=0x1000
+gl_guard_pending=''
+uci() {
+    if [ "$1" = '-q' ]; then shift; fi
+    case "$1" in
+        get) case "${2##*.}" in
+            peer_id) echo "$peer_id";; group_id) echo "$group_id";; via) echo "$via";; mark) echo "$mark";; killswitch) echo "$killswitch";; *) exit 91;; esac;;
+        set) key="${2%%=*}"; value="${2#*=}"
+            case "${key##*.}" in
+                peer_id) peer_id="$value";; group_id) group_id="$value";; via) via="$value";; mark) mark="$value";; *) exit 92;; esac;;
+        commit) [ "$2" = route_policy ] || exit 93;;
+        *) exit 94;;
+    esac
+}
+monotonic_ms() { echo 1; }
+policy_section() { echo vpn; }
+peer_tier() { echo 1; }
+active_iface() { echo "$via"; }
+fastpath_verify_consistency() { [ "$fail" = 0 ]; }
+"""
+for name in ['promo_trace','log','iface_healthy','probe_iface_path','fastpath_verify_kernel','acquire_gl_guard','release_gl_guard','fastpath_prepare_firewall','fastpath_install_mark_override','peer_location','peer_name','iface_summary','notify']:
+    stubs += '\n' + name + '() { :; }\n'
+for setting in ['0','1']:
+    for fail in ['0','1']:
+        check = '\nif promote_iface wgclient2 12 test; then [ "$fail" = 0 ] || exit 95; else [ "$fail" = 1 ] || exit 96; fi\n'
+        check += '[ "$killswitch" = "' + setting + '" ] || exit 97\n'
+        check += '[ "$via" = "' + ('wgclient1' if fail=='1' else 'wgclient2') + '" ] || exit 98\n'
+        # Use a script file to avoid Windows command-line quoting/length limits.
+        with tempfile.TemporaryDirectory(prefix='brume-promotion-') as local:
+            script = pathlib.Path(local) / 'test.sh'
+            script.write_text(promotion + '\n' + stubs + '\nkillswitch=' + setting + '\nfail=' + fail + check, encoding='utf-8', newline='\n')
+            result = subprocess.run([SH, str(script)], capture_output=True, text=True)
+            assert result.returncode == 0, (setting, fail, result.stdout, result.stderr)
+print('PASS: real promotion and consistency-failure rollback preserve killswitch=0 and killswitch=1')
+
 # Hashes from the locally inspected historical v14.1 functions. No archive files needed.
 # Promotion baseline normalizes only the two notification wording changes.
 for name, expected in json.loads((ROOT / 'tooling/fastpath-baseline.json').read_text()).items():

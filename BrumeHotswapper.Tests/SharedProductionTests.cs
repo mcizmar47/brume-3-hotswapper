@@ -47,42 +47,6 @@ public class SharedProductionTests
         Assert.Contains("LC_ALL=C ls -ldn '/root/file with '\"'\"' quote'",command);
         Assert.Contains("'-rwx------:0:0'",command);
     }
-    [Theory][InlineData(false)][InlineData(true)]
-    public async Task OptionalDiagnosticFailureCannotDecideProductionSafety(bool permanentlyUnavailable)
-    {
-        var router=new RoutingFixture(permanentlyUnavailable);
-        var checks=new List<Check>();
-        await RoutingDiagnostics.CollectTablesAsync(router,new[]{"1002","16800","9910"},checks.Add,default);
-        Assert.Equal(3,checks.Count);Assert.Contains(checks,c=>c.Detail.Contains("unavailable"));
-        Assert.Contains("ip -4 route show table 9910",router.Commands);
-        checks.Clear();
-        await RoutingDiagnostics.VerifyAsync(router,"vpn",checks.Add,default);
-        Assert.Contains(checks,c=>c.Name=="Kill switch and IPv6" && c.Status==(permanentlyUnavailable?"BLOCK":"PASS"));
-        if(permanentlyUnavailable)Assert.DoesNotContain(checks,c=>c.Status=="PASS");
-    }
-    private sealed class RoutingFixture(bool unavailable):IRouterTransport
-    {
-        public List<string> Commands=[];private int earlierReads;
-        public Task UploadAsync(string p,string s,CancellationToken ct)=>throw new Exception("No writes allowed");
-        public Task<string> ExecuteAsync(string command,CancellationToken ct)
-        {
-            Commands.Add(command);
-            if(command=="ip -4 route show table 16800" && (++earlierReads==1||unavailable))throw new SafeFailure("Command failed.");
-            return Task.FromResult(command switch {
-                "uci -q get route_policy.vpn.killswitch || true" or "uci -q get route_policy.vpn.enabled || true"=>"1",
-                "uci -q get glipv6.globals.enabled || true"=>"0",
-                "uci -q get route_policy.vpn.tunnel_id"=>"42",
-                "uci -q get route_policy.vpn.mark"=>"0x2000",
-                "uci -q get route_policy.vpn.via"=>"wgclient2",
-                "iptables -w -t mangle -S TUNNEL42_ROUTE_POLICY"=>"-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j MARK --set-xmark 0x2000/0xf000\n-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j DROP",
-                var x when x.StartsWith("iptables -w -t mangle -C")=>"",
-                "ip -4 rule show"=>"0: from all lookup local\n1: from all iif lo lookup 16800\n6000: from all fwmark 0x2000/0xf000 lookup 1002",
-                "ip -4 route show table 1002"=>"default dev wgclient2\nblackhole default metric 254",
-                "ip -4 route show table 16800" or "ip -4 route show table 9910" or "ip -4 route show table local"=>"",
-                _=>throw new Exception("Unexpected production command")
-            });
-        }
-    }
     [Fact] public void NoUnavailableMetadataCommandsInProduction()
     {
         var root=Program.FindRepository()!;
