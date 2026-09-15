@@ -20,7 +20,6 @@ public sealed partial class Runner
         Add("Identity/version",identity.IsBrume && CompatibilityCatalog.TestedFirmware.Contains(identity.Firmware),"Production authentication/identity result checked against the supported firmware catalog.");
         if(!identity.IsBrume)return;
         await FirmwareChecksAsync(identity,ct);
-        await Step("Pending transaction",async()=>{await RouterPrerequisites.EnsureNoTransactionAsync(read,ct);Add("Pending transaction",true,"No pending transaction or lock.");});
         await Step("Required utilities",async()=>{await read.ExecuteAsync(RouterPrerequisites.CapabilitiesCommand,ct);Add("Required utilities",true,"Production command prerequisites passed.");});
         foreach(var path in DeploymentPlanning.Paths)
             await Step("File "+path,async()=>{

@@ -181,8 +181,8 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         using var board = JsonDocument.Parse(await router.ExecuteAsync("ubus call system board", ct));
         var live = c.Router with { Model = board.RootElement.GetProperty("model").GetString() ?? "", Board = board.RootElement.GetProperty("board_name").GetString() ?? "" };
         if (!live.IsBrume) throw new SafeFailure("The connected device is not a GL-MT5000.");
+        live = live with { Rtp2Hash = (await router.ExecuteAsync("sha256sum /usr/bin/rtp2.sh | awk '{print $1}'", ct)).Trim() };
         await RouterPrerequisites.VerifyFirmwareAsync(router, live, ct);
-        await RouterPrerequisites.EnsureNoTransactionAsync(router, ct);
         await router.ExecuteAsync(RouterPrerequisites.CapabilitiesCommand, ct);
         var (active, activePeer) = await VerifyPolicySlotsAsync(c.Profile, ct);
         var policy = Identifier(c.Profile.PolicySection);

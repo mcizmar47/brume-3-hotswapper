@@ -12,7 +12,7 @@ public sealed class ReadOnlyTransport(IRouterTransport inner) : IRouterTransport
     public static readonly string Daemons = "for f in /proc/[0-9]*/cmdline; do [ -r \"$f\" ] || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq '/root/vpn-watch.sh' || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq daemon || continue; basename \"$(dirname \"$f\")\"; done";
     public static string SlotReferences(string slot) => $"uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.via='{slot}'$/\\1/p\"";
     public static string ProfileMembers(string tunnel) => $"sed -n '/^[0-9][0-9]*_[0-9][0-9]*$/p' /etc/vpn_profiles.d/profile{tunnel}";
-    private static readonly HashSet<string> Exact = [Policies, Hosts, Daemons, RouterPrerequisites.PendingCommand, RouterPrerequisites.CapabilitiesCommand,
+    private static readonly HashSet<string> Exact = [Policies, Hosts, Daemons, RouterPrerequisites.CapabilitiesCommand,
         "sha256sum /usr/bin/rtp2.sh | awk '{print $1}'",
         "test \"$(grep -Fxc 'cmd=\"$1\";shift' /usr/bin/rtp2.sh)\" = 1 && sh -n /usr/bin/rtp2.sh",
         "uci -q get route_policy.gl_process_vpn", "uci -q get glipv6.globals.enabled || true",
@@ -27,7 +27,7 @@ public sealed class ReadOnlyTransport(IRouterTransport inner) : IRouterTransport
         "if [ -z \"$(uci changes dhcp)\" ]; then echo false; else echo true; fi"];
     public static bool IsAllowed(string command)
     {
-        if (command == HotswapRuntime.ScanCommand || command == HotswapRuntime.PidCommand || command == RouterPrerequisites.CompletionCommand) return true;
+        if (command == HotswapRuntime.ScanCommand || command == HotswapRuntime.PidCommand) return true;
         if (Exact.Contains(command)) return true;
         if (DeploymentPlanning.Paths.Any(p => BrumeHotswapper.Installer.Services.FileMetadata.Commands(p).Values.Contains(command))) return true;
         if (new[] { "wgclient1", "wgclient2", "wgclient3" }.Any(slot => command == SlotReferences(slot) || command == $"if ip link show {slot} >/dev/null 2>&1; then echo present; fi" || command == $"wg show {slot} latest-handshakes | awk '{{print $2}}'")) return true;

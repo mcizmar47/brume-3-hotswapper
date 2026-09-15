@@ -1,5 +1,8 @@
 # Windows installer: reconciliation pass
 
+> Current behavior: [repair-capable installation](repair-installer.md). This supersedes the persistent transaction/recovery descriptions below. Old bookkeeping is archived and never gates installation.
+
+
 Current deployment and recovery behavior: [installer simplification](installer-simplification.md). This supersedes older descriptions below that prohibit all recovery after startup.
 
 

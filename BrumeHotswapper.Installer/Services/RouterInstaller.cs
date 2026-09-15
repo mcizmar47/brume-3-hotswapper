@@ -1,15 +1,15 @@
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using BrumeHotswapper.Installer.Core;
 namespace BrumeHotswapper.Installer.Services;
 
-// All writes flow through this transaction. No raw router output is reported.
+// Reconcile current router state; rollback information exists only for this execution.
 public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier killSwitch)
 {
     private const string Home = "/root/.hotswap-installer";
-    private const string Stage = Home + "/transaction";
+    private string Stage = "";
+    private string suffix = "";
     private readonly RouterInspection inspection = new(router, killSwitch);
     private static string Hash(string content) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
     private static string Q(string s) => ConfigurationGenerator.Quote(s);
@@ -19,15 +19,12 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
     public async Task<InstallationResult> InstallAsync(InstallationPlan plan, IProgress<string> progress, CancellationToken ct)
     {
         var c = plan.Configuration;
-        await RouterPrerequisites.ArchiveCompletedAsync(router, ct);
-        await RouterPrerequisites.EnsureNoTransactionAsync(router, ct);
         progress.Report("Validating router, VPN ownership and kill switch…");
         var fresh = await inspection.InspectAsync(c, ct);
-        var refreshed = DeploymentPlanning.Create(c, fresh);
-        if (!fresh.Files.SequenceEqual(plan.Snapshot.Files) || fresh.Cron != plan.Snapshot.Cron ||
-            !refreshed.Reservations.SequenceEqual(plan.Reservations) || fresh.ActivePeer != plan.Snapshot.ActivePeer ||
-            fresh.ActiveInterface != plan.Snapshot.ActiveInterface || fresh.KillSwitchEnabled != plan.Snapshot.KillSwitchEnabled)
-            throw new SafeFailure("Router settings changed after Review. Return to the maintenance page and review a fresh plan.");
+        c = c with { Router = fresh.Router };
+        plan = DeploymentPlanning.Create(c, fresh);
+        suffix = Guid.NewGuid().ToString("N");
+        Stage = Home + "/run-" + suffix;
         var content = new Dictionary<string, string>
         {
             ["/root/vpn-watch.conf"] = ConfigurationGenerator.PrivateConfig(c),
@@ -38,17 +35,19 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             content["/root/" + name] = (await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "RouterAssets", name), ct)).Replace("\r\n", "\n");
         var changed = new List<(FileState Before, string After)>();
         var created = new List<ReservationChange>();
-        string attempt = Guid.NewGuid().ToString("N");
-        bool stageAttempted = false, committed = false;
         bool staged = false, cronChanged = false, runtimeStopped = false, started = false;
         string step = "Create protected staging area";
         string expectedFirmwareHash = c.Router.Rtp2Hash;
         try
         {
-            stageAttempted = true;
-            await router.ExecuteAsync($"test ! -e {Stage} && test ! -L {Home} && test ! -L {Home}/backups && mkdir /tmp/vpn-watch-installer-lock || exit 1; trap 'rmdir /tmp/vpn-watch-installer-lock' EXIT; umask 077; mkdir -p {Home}/backups && chmod 700 {Home} {Home}/backups && mkdir {Stage} && printf %s {attempt} > {Stage}/owner || exit 1; trap - EXIT", ct);
+            await router.ExecuteAsync($"test ! -L {Home} && test ! -L {Home}/backups && umask 077 && mkdir -p {Home}/backups && chmod 700 {Home} {Home}/backups && mkdir {Stage}", ct);
             staged = true;
-            await router.UploadAsync(Stage + "/journal.json", JsonSerializer.Serialize(new { Attempt = attempt, fresh.Files, fresh.Cron, PayloadHashes = content.ToDictionary(x => x.Key, x => Hash(x.Value)), Reservations = plan.Reservations.Where(r => r.Create) }), ct);
+            // Old bookkeeping is not authoritative. Keep it as an archive, never replay its journal.
+            step = "Archive legacy installer bookkeeping";
+            foreach (var legacy in new[] { Home + "/transaction", "/tmp/vpn-watch-installer-lock" })
+            {
+                await router.ExecuteAsync($"if [ -e {Q(legacy)} ] || [ -L {Q(legacy)} ]; then mv {Q(legacy)} {Q(Home + "/legacy-" + suffix + "-" + Path.GetFileName(legacy))}; fi", ct);
+            }
             step = "Upload and validate payloads"; progress.Report(step);
             foreach (var (path, body) in content)
             {
@@ -89,7 +88,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                 var after = Hash(body);
                 if (before.Exists && before.Hash == after && before.Mode == (path.EndsWith(".sh") ? "700" : "600")) continue;
                 changed.Add((before, after)); // Record before mutation, including cancellation races.
-                await router.ExecuteAsync($"{Unchanged(before)} && test ! -e {Q(path + ".hotswap-new")} && test ! -L {Q(path + ".hotswap-new")} && cp -p {Q(Stage + "/" + Path.GetFileName(path))} {Q(path + ".hotswap-new")} && mv -f {Q(path + ".hotswap-new")} {Q(path)}", ct);
+                await router.ExecuteAsync($"{Unchanged(before)} && test ! -e {Q(path + ".hotswap-new-" + suffix)} && test ! -L {Q(path + ".hotswap-new-" + suffix)} && cp -p {Q(Stage + "/" + Path.GetFileName(path))} {Q(path + ".hotswap-new-" + suffix)} && mv -f {Q(path + ".hotswap-new-" + suffix)} {Q(path)}", ct);
             }
             step = "Reserve maintenance guard addresses"; progress.Report(step);
             foreach (var r in plan.Reservations.Where(r => r.Create))
@@ -106,7 +105,6 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                 await router.ExecuteAsync($"test -z \"$(uci changes dhcp)\" && mkdir -p {Stage}/uci && uci -P {Stage}/uci set dhcp.{section}=host && uci -P {Stage}/uci set dhcp.{section}.mac={Q(r.Mac.ToLowerInvariant())} && uci -P {Stage}/uci set dhcp.{section}.ip={Q(r.Ip)} && test -z \"$(uci changes dhcp)\" && uci -P {Stage}/uci commit dhcp", ct);
             }
             if (created.Count > 0) await router.ExecuteAsync("/etc/init.d/dnsmasq reload", ct);
-            await router.UploadAsync(Stage + "/firmware-intent.json", JsonSerializer.Serialize(new { Before = c.Router.Rtp2Hash, After = expectedFirmwareHash }), ct);
             step = "Apply GL reconciliation guard"; progress.Report(step);
             if (!CompatibilityCatalog.IsPatched(c.Router.Rtp2Hash))
             {
@@ -121,53 +119,50 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             step = "Configure schedules"; progress.Report(step);
             currentCron = await router.ExecuteAsync("crontab -l 2>/dev/null || true", ct);
             await WriteCronAsync(CronPlanner.Generate(currentCron, c.Maintenance), currentCron, ct);
-            await router.UploadAsync(Stage + "/runtime-start-intent", "The watchdog may have started; do not automatically reverse runtime changes.\n", ct);
             step = "Start supervisor"; progress.Report(step); started = true;
             await router.ExecuteAsync("rm -f /tmp/vpn-watch/state && /root/vpn-watch-supervisor.sh --installer", ct);
             step = "Validate installed runtime"; progress.Report(step);
             var checks = await ValidateAsync(plan, content, ct);
-            committed = true; // Cleanup failure must not roll back a validated running installation.
-            await router.UploadAsync(Stage + "/completed", "installed", ct);
-            await router.ExecuteAsync(CleanupCommand(attempt), ct);
             return new(true, checks);
         }
         catch (Exception failure)
         {
-            if (committed)
-                throw new SafeFailure("Installation and runtime validation succeeded, but staging cleanup did not finish. Inspect /root/.hotswap-installer/transaction and the installer lock before retrying; the installation was retained.");
             bool rollbackOk = true;
             using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             progress.Report("Installation did not finish. Restoring changes made by this attempt…");
             try
             {
-                if (!staged && stageAttempted)
-                    staged = (await router.ExecuteAsync($"if [ -f {Stage}/owner ]; then cat {Stage}/owner; fi", recovery.Token)).Trim() == attempt;
-                if (!staged && stageAttempted) rollbackOk = false;
                 if (staged)
                 {
-                    // Router config writers and the running engine do not share this transaction's lock.
-                    // DHCP remains conservative; after startup, restore files only under the existing hash and policy checks.
+                    // Restore only this run's known writes; never undo an external file or VPN change.
                     if (started) await StopDaemonAsync(recovery.Token);
-                    if (created.Count > 0)
-                        throw new SafeFailure("Committed DHCP recovery requires inspection.");
+                    // Matching DHCP additions are safe to retain: the next install discovers and reuses them.
                     foreach (var item in changed.AsEnumerable().Reverse())
                     {
                         var b = item.Before;
-                        // Do not clean up an incomplete replacement or follow a concurrent symlink.
-                        await router.ExecuteAsync($"test ! -L {Q(b.Path)} && test ! -e {Q(b.Path + ".hotswap-new")} && test ! -L {Q(b.Path + ".hotswap-new")}", recovery.Token);
-                        // Never clobber a third-party update since our write.
-                        var current = (await router.ExecuteAsync($"if [ -f {Q(b.Path)} ]; then sha256sum {Q(b.Path)} | awk '{{print $1}}'; fi", recovery.Token)).Trim();
-                        if (!b.Exists && current.Length == 0) continue;
-                        if (current == b.Hash)
+                        try
                         {
-                            var mode = FileMetadata.ParseListing(await router.ExecuteAsync(FileMetadata.ListingCommand(b.Path), recovery.Token)).Mode;
-                            if (mode == b.Mode) continue;
-                            rollbackOk = false; // A metadata-only concurrent edit has no provable owner.
-                            continue;
+                            await router.ExecuteAsync($"test ! -L {Q(b.Path)} && rm -f {Q(b.Path + ".hotswap-new-" + suffix)} {Q(b.Path + ".hotswap-restore-" + suffix)}", recovery.Token);
+                            // Never clobber a third-party update since our write.
+                            var current = (await router.ExecuteAsync($"if [ -f {Q(b.Path)} ]; then sha256sum {Q(b.Path)} | awk '{{print $1}}'; fi", recovery.Token)).Trim();
+                            if (!b.Exists && current.Length == 0) continue;
+                            if (current == b.Hash)
+                            {
+                                var mode = FileMetadata.ParseListing(await router.ExecuteAsync(FileMetadata.ListingCommand(b.Path), recovery.Token)).Mode;
+                                if (mode == b.Mode) continue;
+                                if (item.After == b.Hash && mode == (b.Path.EndsWith(".sh") ? "700" : "600"))
+                                    await router.ExecuteAsync($"chmod {b.Mode} {Q(b.Path)}", recovery.Token);
+                                else rollbackOk = false;
+                                continue;
+                            }
+                            if (current != item.After) { rollbackOk = false; continue; }
+                            if (b.Exists) await router.ExecuteAsync($"test ! -L {Q(b.Path + ".hotswap-restore-" + suffix)} && test ! -e {Q(b.Path + ".hotswap-restore-" + suffix)} && test \"$(sha256sum {Q(Home + "/backups/" + b.Hash)} | awk '{{print $1}}')\" = {Q(b.Hash)} && cp {Q(Home + "/backups/" + b.Hash)} {Q(b.Path + ".hotswap-restore-" + suffix)} && chmod {b.Mode} {Q(b.Path + ".hotswap-restore-" + suffix)} && mv -f {Q(b.Path + ".hotswap-restore-" + suffix)} {Q(b.Path)}", recovery.Token);
+                            else await router.ExecuteAsync($"rm -f {Q(b.Path)}", recovery.Token);
                         }
-                        if (current != item.After) { rollbackOk = false; continue; }
-                        if (b.Exists) await router.ExecuteAsync($"test ! -L {Q(b.Path + ".hotswap-restore")} && test ! -e {Q(b.Path + ".hotswap-restore")} && test \"$(sha256sum {Q(Home + "/backups/" + b.Hash)} | awk '{{print $1}}')\" = {Q(b.Hash)} && cp {Q(Home + "/backups/" + b.Hash)} {Q(b.Path + ".hotswap-restore")} && chmod {b.Mode} {Q(b.Path + ".hotswap-restore")} && mv -f {Q(b.Path + ".hotswap-restore")} {Q(b.Path)}", recovery.Token);
-                        else await router.ExecuteAsync($"rm -f {Q(b.Path)}", recovery.Token);
+                        catch {
+                            rollbackOk = false;
+                            progress.Report("WARN: Could not restore " + b.Path + "; its backup was retained. Other files will still be restored where possible.");
+                        }
                     }
                     bool sameRuntime =
                         (await router.ExecuteAsync($"uci -q get route_policy.{RouterInspection.Identifier(fresh.Policy)}.peer_id", recovery.Token)).Trim() == fresh.ActivePeer &&
@@ -188,32 +183,36 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                         if (!RuntimeValidation.ValidStatus(restoredStatus)) rollbackOk = false;
                     }
                     if (!sameRuntime) rollbackOk = false;
-                    if (rollbackOk) {
-                        await router.UploadAsync(Stage + "/completed", "rolled-back", recovery.Token);
-                        await router.ExecuteAsync(CleanupCommand(attempt), recovery.Token);
-                    }
+
                 }
             }
             catch { rollbackOk = false; }
             string detail = failure is SafeFailure safe ? safe.Message + " " : "";
-            string message = $"Installation stopped during: {step}. " + detail + (rollbackOk ? "Changes made by this attempt were rolled back." :
-                "Recovery needs attention. The private transaction journal remains at /root/.hotswap-installer/transaction; do not remove it before inspecting the affected files. Runtime VPN changes are not automatically reversed.");
+            string message = $"Installation stopped during: {step}. " + detail + (rollbackOk ? "Files and runtime changes made by this attempt were rolled back." :
+                "Some changes could not be restored or verified. Backups were retained; rerun Install to reconcile current state. No persistent recovery gate was created.");
+            if (created.Count > 0) message += " Matching DHCP reservations created by this run were retained for reuse.";
             if (failure is OperationCanceledException && rollbackOk) throw new SafeFailure("Installation cancelled; changes made by this attempt were rolled back.");
             throw new SafeFailure(message);
         }
+        finally
+        {
+            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            try {
+                string temporary = string.Join(" ", content.Keys.Append("/usr/bin/rtp2.sh").SelectMany(p => new[]{Q(p+".hotswap-new-"+suffix),Q(p+".hotswap-restore-"+suffix)}));
+                await router.ExecuteAsync($"rm -f {temporary}; test ! -L {Home} && test ! -L {Stage} && rm -rf {Stage}", cleanup.Token);
+            } catch {
+                progress.Report("WARN: Temporary file cleanup was incomplete. A later installation uses a fresh directory; backups and running state were retained.");
+            }
+        }
     }
-    // A delayed command from an old session must never remove a newer transaction.
-    private static string CleanupCommand(string attempt) =>
-        $"test ! -L {Stage} && test \"$(cat {Stage}/owner)\" = {Q(attempt)} && rm -rf {Stage} && rmdir /tmp/vpn-watch-installer-lock";
     public static string ReservationSection(string mac) => "hotswap_" + mac.Replace(":", "").ToLowerInvariant();
     private static string Unchanged(FileState before) => before.Exists
         ? $"test ! -L {Q(before.Path)} && test \"$(sha256sum {Q(before.Path)} | awk '{{print $1}}')\" = {Q(before.Hash)} && {FileMetadata.MatchesCommand(before.Path, before.Mode)}"
         : $"test ! -e {Q(before.Path)} && test ! -L {Q(before.Path)}";
     private async Task WriteCronAsync(string cron, string expected, CancellationToken ct)
     {
-        await router.UploadAsync(Stage + "/cron.expected", expected, ct);
         await router.UploadAsync(Stage + "/cron", cron, ct);
-        await router.ExecuteAsync($"(crontab -l 2>/dev/null || true) > {Stage}/cron.current; cmp -s {Stage}/cron.expected {Stage}/cron.current && crontab {Stage}/cron", ct);
+        await router.ExecuteAsync($"test \"$(crontab -l 2>/dev/null || true)\" = {Q(expected.TrimEnd('\n'))} && crontab {Stage}/cron", ct);
     }
     private Task StopDaemonAsync(CancellationToken ct) => new HotswapRuntime(router).StopAsync(ct);
     private async Task<IReadOnlyList<string>> ValidateAsync(InstallationPlan plan, Dictionary<string,string> content, CancellationToken ct)

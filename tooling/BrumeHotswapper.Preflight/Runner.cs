@@ -56,7 +56,6 @@ public sealed partial class Runner(SshRouterSession session, Action<Check> repor
             var lines = cron.Split('\n').Select(l => l.Trim()).ToArray();
             Add("Cron", true, $"Owned supervisor jobs: {lines.Count(l => l == CronPlanner.Supervisor)}; maintenance jobs: {lines.Count(l => l == CronPlanner.Maintenance)}. Unrelated commands withheld.");
         });
-        await Step("Pending transaction", async () => { var value = (await read.ExecuteAsync("if [ -e /root/.hotswap-installer/transaction ] || [ -e /tmp/vpn-watch-installer-lock ]; then echo pending; else echo clear; fi", ct)).Trim(); Add("Pending transaction", value == "clear", value == "clear" ? "No transaction or installer lock exists." : "Transaction/lock exists; left untouched."); });
         foreach (string path in DeploymentPlanning.Paths)
             await Step("File " + path, async () =>
             {

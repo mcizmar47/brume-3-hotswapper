@@ -1,5 +1,8 @@
 # Deterministic installer and legacy migration
 
+> Current behavior: [repair-capable installation](repair-installer.md). This supersedes the persistent transaction/recovery descriptions below. Old bookkeeping is archived and never gates installation.
+
+
 ## Evidence and scope
 
 Reviewed current Git history through cd985e1 and the historical Brume directory, including v14.1, supervisor v3, reboot v5 and guard v1. The guard patcher is identical. The current generalized location/reboot data and supervisor serialization are retained. No router-side engine file was changed.

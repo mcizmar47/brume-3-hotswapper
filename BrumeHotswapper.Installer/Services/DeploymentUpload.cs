@@ -14,13 +14,12 @@ public interface IUploadChannel
 }
 public sealed class DeploymentUpload(IUploadChannel channel)
 {
-    public const string Stage = "/root/.hotswap-installer/transaction";
     public const int MaximumBytes = 2 * 1024 * 1024;
     private UploadKind? selected;
     public static string Hash(ReadOnlySpan<byte> data) => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
     public static void ValidatePath(string path)
     {
-        if (!Regex.IsMatch(path, @"^/root/\.hotswap-installer/transaction/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\z") || path.EndsWith("/owner"))
+        if (!Regex.IsMatch(path, @"^/root/\.hotswap-installer/run-[a-f0-9]{32}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\z"))
             throw new SafeFailure("Upload destination is outside installer staging or has unsupported characters.");
     }
     public async Task<UploadKind> ProbeAsync(CancellationToken ct)
@@ -46,11 +45,10 @@ public sealed class DeploymentUpload(IUploadChannel channel)
         if (bytes.Length > MaximumBytes) throw new SafeFailure("Upload exceeds deployment limit.");
         ct.ThrowIfCancellationRequested();
         var kind = selected ?? await ProbeAsync(ct);
-        string owner = (await channel.CommandAsync($"cat {Stage}/owner", ct)).Trim();
-        if (!Regex.IsMatch(owner, "^[a-f0-9]{32}$")) throw new SafeFailure("Upload requires an owned transaction journal.");
-        string temporary = Stage + "/.upload-" + Guid.NewGuid().ToString("N");
-        string guard = $"test ! -L /root/.hotswap-installer && test ! -L {Stage} && test -d {Stage} && test ! -L {Stage}/owner && test \"$(cat {Stage}/owner)\" = '{owner}' && test \"$(id -u)\" = 0 && {FileMetadata.MatchesCommand(Stage, "700", 'd')}";
-        string cleanup = $"if test ! -L /root/.hotswap-installer && test ! -L {Stage} && test \"$(cat {Stage}/owner)\" = '{owner}'; then rm -f '{temporary}'; fi";
+        string stage = path[..path.LastIndexOf('/')];
+        string temporary = stage + "/.upload-" + Guid.NewGuid().ToString("N");
+        string guard = $"test ! -L /root/.hotswap-installer && test ! -L {stage} && test -d {stage} && test \"$(id -u)\" = 0 && {FileMetadata.MatchesCommand(stage, "700", 'd')}";
+        string cleanup = $"if test ! -L /root/.hotswap-installer && test ! -L {stage}; then rm -f '{temporary}'; fi";
         try
         {
             string prepare = guard + $" || exit 1; test ! -L '{path}' || exit 1; umask 077; set -C; ";
@@ -72,7 +70,7 @@ public sealed class DeploymentUpload(IUploadChannel channel)
         {
             using var cleanupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             try { await channel.CommandAsync(cleanup, cleanupTimeout.Token); }
-            catch { /* Remaining partial belongs to the transaction; existing recovery handles it. */ }
+            catch { /* Run-specific partials never block a later installation. */ }
         }
     }
 }

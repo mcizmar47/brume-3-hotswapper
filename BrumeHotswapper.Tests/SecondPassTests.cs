@@ -124,6 +124,7 @@ public class SecondPassTests
     // In-memory command boundary fixture: never invokes SSH, SFTP or a shell.
     internal sealed class RouterFixture : IRouterTransport
     {
+        private static string NormalizePaths(string value) => Regex.Replace(Regex.Replace(value, @"/run-[a-f0-9]{32}", "/run"), @"\.hotswap-(new|restore)-[a-f0-9]{32}", ".hotswap-$1");
         public Dictionary<string,string> Uploads {get;}=[];
         public Dictionary<string,string> Installed {get;}=[];
         public string FirmwareHash=CompatibilityCatalog.StockHash;
@@ -132,10 +133,11 @@ public class SecondPassTests
         public bool Running,RejectPatch;
         public int RealPatches;
         private static string Hash(string s)=>Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(s))).ToLowerInvariant();
-        public Task UploadAsync(string path,string content,CancellationToken ct) {ct.ThrowIfCancellationRequested();Uploads[path]=content;return Task.CompletedTask;}
+        public Task UploadAsync(string path,string content,CancellationToken ct) {ct.ThrowIfCancellationRequested();Uploads[NormalizePaths(path)]=content;return Task.CompletedTask;}
         public Task<string> ExecuteAsync(string cmd,CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            cmd=NormalizePaths(cmd);
             string result="";
             var metadata = DeploymentPlanning.Paths.SelectMany(p => FileMetadata.Commands(p).Select(f => (Path:p, Field:f.Key, Command:f.Value))).FirstOrDefault(f => f.Command == cmd);
             if (metadata.Command != null) {
@@ -146,10 +148,9 @@ public class SecondPassTests
                     "size" => "123", "sha256" => metadata.Path == "/usr/bin/rtp2.sh" ? FirmwareHash : Hash(Installed[metadata.Path]), _ => ""
                 };
             }
-            else if(cmd==RouterPrerequisites.PendingCommand) result="clear";
             else if(cmd=="ubus call system board") result="{\"model\":\"GL.iNet GL-MT5000\",\"board_name\":\"glinet,gl-mt5000\"}";
             else if(cmd.StartsWith("sha256sum /usr/bin/rtp2.sh")) result=FirmwareHash;
-            else if(cmd.StartsWith("sha256sum /root/.hotswap-installer/transaction/rtp2.preview")) result=CompatibilityCatalog.PatchedHash;
+            else if(cmd.StartsWith("sha256sum /root/.hotswap-installer/run/rtp2.preview")) result=CompatibilityCatalog.PatchedHash;
             else if(cmd is "uci -q get route_policy.vpn.killswitch || true" or "uci -q get route_policy.vpn.enabled || true") result="1";
             else if(cmd=="uci -q get glipv6.globals.enabled || true") result="0";
             else if(cmd=="uci -q get route_policy.vpn.mark") result="0x1000";
@@ -168,7 +169,7 @@ public class SecondPassTests
             else if(cmd==HotswapRuntime.ScanCommand) result=Running?"123 1 daemon":"";
             else if(cmd==HotswapRuntime.PidCommand) result=Running?"123":"";
             else if(cmd.StartsWith("crontab -l")) result=Cron;
-            else if(cmd.Contains("&& crontab /root/")) Cron=Uploads["/root/.hotswap-installer/transaction/cron"];
+            else if(cmd.Contains("&& crontab /root/")) Cron=Uploads["/root/.hotswap-installer/run/cron"];
             else if(cmd.StartsWith("set -e; test ! -L '/root/.hotswap-installer/backups/"))
             {
                 var match=Regex.Match(cmd,@"sha256sum '([^']+)'");
@@ -183,7 +184,7 @@ public class SecondPassTests
                     else Installed[match.Groups[2].Value]=Backups[match.Groups[1].Value];
                 }
             }
-            else if(cmd.Contains("cp -p '/root/.hotswap-installer/transaction/"))
+            else if(cmd.Contains("cp -p '/root/.hotswap-installer/run/"))
             {
                 var match=Regex.Match(cmd,@"cp -p '([^']+)' '([^']+)\.hotswap-new'");
                 Installed[match.Groups[2].Value]=Uploads[match.Groups[1].Value];
@@ -202,11 +203,11 @@ public class SecondPassTests
             }
             else if(cmd.StartsWith("rm -f '"))
                 Installed.Remove(Regex.Match(cmd,@"rm -f '([^']+)'").Groups[1].Value);
-            else if (!new[] { "test ", "set -e; test ", "sh -n ", "sh /root/.hotswap-installer/transaction/", "cp /usr/bin/rtp2.sh ",
-                "if [ -e /root/.hotswap-installer/transaction", "if ip link show wgclient", "grep -Fxq ",
+            else if (!new[] { "test ", "set -e; test ", "sh -n ", "sh /root/.hotswap-installer/run/", "cp /usr/bin/rtp2.sh ",
+                "if [ -e '/root/.hotswap-installer/transaction'", "if [ -e '/tmp/vpn-watch-installer-lock'", "if ip link show wgclient", "grep -Fxq ",
                 "uci -q get network.wgclient2.config", "uci -q get network.wgclient3.config", "uci -q show dhcp",
                 "if [ -r /tmp/dhcp.leases", "ip -4 neigh show", "ip -o -4 addr show", "if uci -q get dhcp.",
-                "/etc/init.d/dnsmasq reload", "wg show ", "rm -rf /root/.hotswap-installer/transaction" }.Any(cmd.StartsWith))
+                "/etc/init.d/dnsmasq reload", "wg show ", "rm -rf /root/.hotswap-installer/run" }.Any(cmd.StartsWith))
                 throw new InvalidOperationException("Unexpected fixture command: " + cmd);
             return Task.FromResult(result);
         }

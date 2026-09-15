@@ -6,6 +6,7 @@ using BrumeHotswapper.Preflight;
 namespace BrumeHotswapper.Tests;
 public class FinalBlockerTests
 {
+    private const string TestStage = "/root/.hotswap-installer/run-0123456789abcdef0123456789abcdef";
     [Fact] public async Task HistoricalGuardIsPreservedByTransaction()
     {
         var router = new SecondPassTests.RouterFixture { FirmwareHash = CompatibilityCatalog.HistoricalPatchedHash };
@@ -36,7 +37,7 @@ public class FinalBlockerTests
     {
         byte[] data = Enumerable.Range(0,length).Select(i=>(byte)i).ToArray();
         var ch = new UploadFixture(); var uploader = new DeploymentUpload(ch);
-        await uploader.UploadAsync(DeploymentUpload.Stage+"/payload", data, default);
+        await uploader.UploadAsync(TestStage+"/payload", data, default);
         Assert.Equal(data, ch.Data); Assert.True(ch.Published);
         Assert.DoesNotContain(ch.Commands, x=>x.Contains("base64"));
         Assert.DoesNotContain(ch.Commands, x=>x.Contains("synthetic-secret"));
@@ -45,17 +46,17 @@ public class FinalBlockerTests
     public async Task BadTransfersNeverPublish(string fault)
     {
         var ch = new UploadFixture { Fault = fault };
-        await Assert.ThrowsAsync<SafeFailure>(()=>new DeploymentUpload(ch).UploadAsync(DeploymentUpload.Stage+"/payload", "synthetic-secret"u8.ToArray(), default));
+        await Assert.ThrowsAsync<SafeFailure>(()=>new DeploymentUpload(ch).UploadAsync(TestStage+"/payload", "synthetic-secret"u8.ToArray(), default));
         Assert.False(ch.Published); Assert.True(ch.Cleaned);
     }
     [Fact] public async Task CancelledTransferNeverPublishes()
     {
         var ch = new UploadFixture { Fault = "cancel" };
-        await Assert.ThrowsAsync<OperationCanceledException>(()=>new DeploymentUpload(ch).UploadAsync(DeploymentUpload.Stage+"/payload", new byte[20000], default));
+        await Assert.ThrowsAsync<OperationCanceledException>(()=>new DeploymentUpload(ch).UploadAsync(TestStage+"/payload", new byte[20000], default));
         Assert.False(ch.Published); Assert.True(ch.Cleaned);
     }
-    [Theory] [InlineData("/root/final")] [InlineData("/root/.hotswap-installer/transaction/../final")]
-    [InlineData("/root/.hotswap-installer/transaction/a';reboot")]
+    [Theory] [InlineData("/root/final")] [InlineData("/root/.hotswap-installer/run-0123456789abcdef0123456789abcdef/../final")]
+    [InlineData("/root/.hotswap-installer/run-0123456789abcdef0123456789abcdef/a';reboot")]
     [InlineData("/root/.hotswap-installer/transaction/owner")]
     public void UnsafePathsRejectBeforeChannel(string path) => Assert.Throws<SafeFailure>(()=>DeploymentUpload.ValidatePath(path));
     [Fact] public async Task CapabilitiesSelectStreamWithoutSftpAndBlockIfBothFail()
@@ -67,13 +68,13 @@ public class FinalBlockerTests
     [Fact] public async Task SftpFallbackUsesSameIntegrityGate()
     {
         var ch = new UploadFixture { StreamAvailable=false, SftpAvailable=true };
-        await new DeploymentUpload(ch).UploadAsync(DeploymentUpload.Stage+"/payload", new byte[]{0,255,13,10}, default);
+        await new DeploymentUpload(ch).UploadAsync(TestStage+"/payload", new byte[]{0,255,13,10}, default);
         Assert.True(ch.Published); Assert.Equal(new byte[]{0,255,13,10}, ch.Data);
     }
     [Fact] public async Task OversizedPayloadRejectedBeforeTransport()
     {
         var ch = new UploadFixture();
-        await Assert.ThrowsAsync<SafeFailure>(()=>new DeploymentUpload(ch).UploadAsync(DeploymentUpload.Stage+"/payload", new byte[DeploymentUpload.MaximumBytes+1], default));
+        await Assert.ThrowsAsync<SafeFailure>(()=>new DeploymentUpload(ch).UploadAsync(TestStage+"/payload", new byte[DeploymentUpload.MaximumBytes+1], default));
         Assert.Empty(ch.Commands);
     }
     private sealed class UploadFixture : IUploadChannel {

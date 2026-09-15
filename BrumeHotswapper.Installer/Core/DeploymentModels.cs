@@ -29,7 +29,7 @@ public static class DeploymentPlanning
     {
         ConfigurationGenerator.Validate(config);
         var frozen = config.Tiers.Select(t => { var copy = new TierColumn(t.Title, t.Tier); foreach (var g in t.Locations) copy.Locations.Add(g); return copy; }).ToArray();
-        config = config with { Tiers = frozen };
+        config = config with { Tiers = frozen, Router = snapshot.Router };
         var reservations = DhcpPlanner.Plan(config.Guards, snapshot.Lan.Reservations, snapshot.Lan.Observations ?? snapshot.Lan.Clients, snapshot.Lan.Network.Address);
         foreach (var r in reservations)
             if (!snapshot.Lan.Network.ContainsHost(r.Ip) || snapshot.Lan.RouterAddresses?.Contains(r.Ip) == true) throw new SafeFailure("A protected device address is outside the usable LAN subnet. Refresh LAN discovery.");

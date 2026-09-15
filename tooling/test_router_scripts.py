@@ -46,6 +46,22 @@ with tempfile.TemporaryDirectory(prefix="brume-shell-") as directory:
     run(command, 1)  # A valid old backup must not hide a changed source file.
     original_file.write_bytes(backup_file.read_bytes())
     run(command)
+    # Execute the production legacy-bookkeeping archive command; do not read/replay a journal.
+    statement = next(line for line in installer.splitlines() if 'then mv {Q(legacy)}' in line)
+    archive_command = statement.split('ExecuteAsync($"', 1)[1].rsplit('", ct)', 1)[0]
+    legacy = directory / 'transaction'
+    archive = directory / 'legacy-unique-transaction'
+    legacy.mkdir()
+    (legacy / 'journal.json').write_text('incomplete stale intent', encoding='utf-8')
+    live_file = directory / 'live-config'
+    live_file.write_text('current configuration', encoding='utf-8')
+    archive_command = archive_command.replace('{Q(legacy)}', "'" + legacy.as_posix() + "'")
+    archive_command = archive_command.replace('{Q(Home + "/legacy-" + suffix + "-" + Path.GetFileName(legacy))}', "'" + archive.as_posix() + "'")
+    run(archive_command)
+    run(archive_command)  # already absent is an idempotent success
+    assert not legacy.exists()
+    assert (archive / 'journal.json').read_text() == 'incomplete stale intent'
+    assert live_file.read_text() == 'current configuration'
     locations = directory / "locations.tsv"
     locations.write_text("1\t1\t1\taaa\tGermany / Frankfurt\t11\n2\t1\t2\tbbb\tGermany / Berlin\t12\n3\t2\t1\tccc\tFrance / Paris\t13\n4\t3\t1\tddd\tJapan / Tokyo\t14\n", encoding="utf-8")
     definitions = '\n'.join(function(name) for name in ["peer_rank", "peer_tier", "rank_major_tier", "rank_label", "rank_order", "tier1_ranks", "recovery_ranks"])

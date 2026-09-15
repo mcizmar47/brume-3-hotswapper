@@ -103,7 +103,7 @@ public class ArchiveReconciliationTests
         router.After = cmd => { if (cmd.StartsWith("rm -f /tmp/vpn-watch/state")) throw new IOException("synthetic-secret"); };
         var error = await Assert.ThrowsAsync<SafeFailure>(() => installer.InstallAsync(plan, new Progress<string>(), default));
         Assert.Contains("rolled back", error.Message); Assert.Empty(fake.Installed);
-        Assert.Contains(router.Commands, c => c.Contains("rm -rf /root/.hotswap-installer/transaction"));
+        Assert.Contains(router.Commands, c => c.Contains("rm -rf /root/.hotswap-installer/run-"));
         Assert.False(fake.Running); Assert.DoesNotContain("synthetic-secret", error.Message);
     }
     [Fact] public async Task CleanupFailureDoesNotUndoValidatedInstallation()
@@ -111,16 +111,16 @@ public class ArchiveReconciliationTests
         var fake = new RouterFixture(); var router = new Intercept(fake);
         var installer = new RouterInstaller(router, new VerifiedKillSwitch());
         var plan = await installer.PlanAsync(Config(), default);
-        router.Before = cmd => { if (cmd.Contains("rm -rf /root/.hotswap-installer/transaction")) throw new IOException(); };
-        var error = await Assert.ThrowsAsync<SafeFailure>(() => installer.InstallAsync(plan, new Progress<string>(), default));
-        Assert.Contains("validation succeeded", error.Message); Assert.True(fake.Running); Assert.Equal(7, fake.Installed.Count);
+        router.Before = cmd => { if (cmd.Contains("rm -rf /root/.hotswap-installer/run-")) throw new IOException(); };
+        var result = await installer.InstallAsync(plan, new Progress<string>(), default);
+        Assert.True(result.Success); Assert.True(fake.Running); Assert.Equal(7, fake.Installed.Count);
     }
     [Fact] public async Task InstallRetainsUnrelatedCronEditMadeAfterReview()
     {
         var fake = new RouterFixture(); var router = new Intercept(fake);
         var installer = new RouterInstaller(router, new VerifiedKillSwitch());
         var plan = await installer.PlanAsync(Config(), default);
-        router.After = cmd => { if (cmd.Contains("mkdir /tmp/vpn-watch-installer-lock")) fake.Cron += "22 2 * * * /root/new-user-job\n"; };
+        router.After = cmd => { if (cmd.Contains("mkdir -p /root/.hotswap-installer/backups")) fake.Cron += "22 2 * * * /root/new-user-job\n"; };
         await installer.InstallAsync(plan, new Progress<string>(), default);
         Assert.Contains("/root/new-user-job", fake.Cron);
     }
@@ -158,7 +158,7 @@ public class ArchiveReconciliationTests
     [Theory]
     [InlineData("uci -P")]
     [InlineData("/etc/init.d/dnsmasq reload")]
-    public async Task DhcpBoundaryFailureRetainsJournalWithoutDeletingSections(string boundary)
+    public async Task DhcpBoundaryFailureRetainsReservationsAndCleansTemporaryFiles(string boundary)
     {
         var fake = new RouterFixture();
         var router = new Intercept(fake) { Read = cmd => cmd switch {
@@ -173,9 +173,10 @@ public class ArchiveReconciliationTests
         var plan = await installer.PlanAsync(c, default);
         router.After = cmd => { if (cmd.Contains(boundary)) throw new IOException(); };
         var error = await Assert.ThrowsAsync<SafeFailure>(() => installer.InstallAsync(plan, new Progress<string>(), default));
-        Assert.Contains("Recovery needs attention", error.Message);
-        Assert.DoesNotContain(router.Commands, cmd => cmd.Contains("uci delete") || cmd.Contains("rm -rf /root/.hotswap-installer/transaction"));
-        Assert.Contains(fake.Uploads.Keys, k => k.EndsWith("journal.json"));
+        Assert.Contains("retained for reuse", error.Message);
+        Assert.DoesNotContain(router.Commands, cmd => cmd.Contains("uci delete"));
+        Assert.Contains(router.Commands,cmd=>cmd.Contains("rm -rf /root/.hotswap-installer/run-"));
+        Assert.DoesNotContain(fake.Uploads.Keys,k=>k.EndsWith("journal.json"));
     }
     [Fact] public void HistoricalPatchHashRetainsVariantIdentity()
     {

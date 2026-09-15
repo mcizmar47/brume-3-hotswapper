@@ -97,31 +97,6 @@ public class SimplificationTests
             return inner.ExecuteAsync(c,ct);
         }
     }
-    [Theory][InlineData("installed",true)][InlineData("rolled-back",true)][InlineData("",false)][InlineData("in-progress",false)]
-    public async Task StaleStateRequiresVerifiedCompletion(string completion,bool accepted)
-    {
-        var router=new TransactionState(completion);
-        if(accepted) {
-            await RouterPrerequisites.EnsureNoTransactionAsync(router,default);
-            Assert.False(router.Archived);
-            await RouterPrerequisites.ArchiveCompletedAsync(router,default);
-            Assert.True(router.Archived);
-        } else {
-            var error=await Assert.ThrowsAsync<SafeFailure>(()=>RouterPrerequisites.ArchiveCompletedAsync(router,default));
-            Assert.Contains("Retain the journal",error.Message);Assert.False(router.Archived);
-        }
-    }
-    private sealed class TransactionState(string completion):IRouterTransport
-    {
-        public bool Archived;
-        public Task UploadAsync(string p,string s,CancellationToken ct)=>throw new Exception();
-        public Task<string> ExecuteAsync(string c,CancellationToken ct) {
-            if(c==RouterPrerequisites.PendingCommand)return Task.FromResult("pending");
-            if(c==RouterPrerequisites.CompletionCommand)return Task.FromResult(completion);
-            if(c.Contains("mv /root/.hotswap-installer/transaction")){Assert.DoesNotContain("rm -rf",c);Archived=true;return Task.FromResult("");}
-            throw new Exception("Unexpected command");
-        }
-    }
     private sealed class ProcessFixture(string[] samples):IRouterTransport
     {
         public int Reads; public List<string> Commands=[];
