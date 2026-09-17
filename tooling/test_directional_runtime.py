@@ -19,15 +19,15 @@ def check(names, stubs, assertions):
     global COUNT
     with tempfile.TemporaryDirectory(prefix='hotswapper-roles-') as directory:
         path=pathlib.Path(directory)
-        # The bundled Windows shell omits sleep; this local fixture provides it.
-        sleeper=path/'sleep'
+        # Host-only timing fixture; never models router fractional sleep.
+        sleeper=path/'host_pause'
         sleeper.write_text("#!/bin/sh\nexec '"+pathlib.Path(sys.executable).as_posix()+"' -c 'import sys,time; time.sleep(float(sys.argv[1]))' \"$1\"\n",encoding='utf-8',newline='\n')
         sleeper.chmod(0o755)
         code=f"cd '{path.as_posix()}' || exit 99\n"
         code+='PATH="$PWD:$PATH"; export PATH\n'
         code+='RUNTIME_DIR=.; PERSIST_DIR=.; STATE_FILE=state; WAN_STATE_FILE=wan; WAN_PENDING_FILE=pending; LAST_UPTIER_FILE=last-up\n'
         code+='DETECTOR_ENABLED=0; IN_DETECTOR=0; DETECT_FAILED=0; SLOW_REQUESTED=0; PROMOTION_EPOCH=0; FAST_FAILURES=0\n'
-        code+='FAST_FAILURE_THRESHOLD=2; DETECTOR_DELAY=0.150; FAST_PROBE_WINDOW=0.200\n'
+        code+='FAST_FAILURE_THRESHOLD=2; DETECTOR_DELAY_US=150000; FAST_PROBE_WINDOW_US=200000\n'
         code+='log() { echo "$*" >> events; }\n'
         code+='\n'.join(function(n) for n in names)+'\n'+stubs+'\n'+assertions
         script=path/'test.sh';script.write_text(code,encoding='utf-8',newline='\n')
@@ -115,7 +115,7 @@ fast_path_round() {
 }
 iface_peer() { echo 20; }
 promote_iface() { echo "$MS:$1" > promoted; DETECT_FAILED=0; return 0; }
-sleep() { [ "$1" = 0.150 ] || exit 91; MS=$((MS+150)); }
+delay_us() { [ "$1" = 150000 ] || exit 91; MS=$((MS+150)); }
 prepare_iface() { exit 92; }
 rank_order() { exit 93; }
 wan_recovery_allowed() { exit 94; }
@@ -162,8 +162,8 @@ fast_health_pass() {
     busy=1; echo "start:$MS" >> times
     MS=$((MS+400)); echo "end:$MS" >> times; busy=0
 }
-sleep() {
-    [ "$busy" = 0 ] && [ "$1" = 0.150 ] || exit 92
+delay_us() {
+    [ "$busy" = 0 ] && [ "$1" = 150000 ] || exit 92
     echo "sleep:$MS" >> times; MS=$((MS+150))
 }
 """,r"""
@@ -179,10 +179,9 @@ sleep:950' ] || exit 10
 # a slow command runs. Notification stdin and provider stdout survive.
 check(['slow_command'],r"""
 DETECTOR_ENABLED=1
-setsid() { "$@"; }
-detector_iteration() { echo pass >> passes; command sleep 0.01; }
+detector_iteration() { echo pass >> passes; host_pause 0.01; }
 """,r"""
-slow_command sh -c 'sleep 0.08; cat' <<EOF
+slow_command sh -c 'host_pause 0.08; cat' <<EOF
 private-config-fixture
 EOF
 [ $? -eq 0 ] && [ -s passes ] && [ -z "$SLOW_PID" ] || exit 10
@@ -191,19 +190,18 @@ EOF
 # Nested promotion diagnostics cannot truncate the in-flight provider output.
 check(['slow_command'],r"""
 DETECTOR_ENABLED=1
-setsid() { "$@"; }
-detector_iteration() { IN_DETECTOR=1; slow_command echo ignored; IN_DETECTOR=0; command sleep 0.01; }
+detector_iteration() { IN_DETECTOR=1; slow_command echo ignored; IN_DETECTOR=0; host_pause 0.01; }
 """,r"""
-slow_command sh -c 'echo provider-output; sleep 0.08' || exit 10
+slow_command sh -c 'echo provider-output; host_pause 0.08' || exit 10
 [ "$(cat command-output)" = provider-output ] || exit 11
 """)
 check(['stop_slow_command'],r"""
 SLOW_PID=12345
-kill() { echo "$*" > stopped; }
+kill() { return 1; }
 wait() { echo "$*" > reaped; }
 """,r"""
 stop_slow_command
-[ "$(cat stopped)" = '-TERM -- -12345' ] && [ "$(cat reaped)" = 12345 ] && [ -z "$SLOW_PID" ] || exit 10
+[ "$(cat reaped)" = 12345 ] && [ -z "$SLOW_PID" ] || exit 10
 """)
 # A completed provider call must not start/promote after a detector changed CURRENT.
 check(['prepare_iface'],r"""
@@ -251,7 +249,6 @@ prepare_iface wgclient3 20 uptier || exit 12
 # A slow-path promotion is atomic too: no nested detector while its path probe runs.
 check(['slow_command'],r"""
 DETECTOR_ENABLED=1; PROMOTION_CRITICAL=1
-setsid() { exit 91; }
 detector_iteration() { exit 92; }
 """,r"""
 slow_command true || exit 10
@@ -306,9 +303,26 @@ run_cycle || exit 10
 """)
 # Bound probes use any responding target and reap every ping before returning.
 check(['fast_path_round'],r"""
+delay_us() { [ "$1" = 200000 ]; }
 ping() { [ "$7" = 1 ] || exit 90; case "$*" in *1.1.1.1) return 1;; *) return 0;; esac; }
 """,r"""
 fast_path_round wgclient2 || exit 10
 [ -z "$(jobs -p)" ] || exit 11
+""")
+# Behavioral timing validation: unsupported, no-op and one-second waits fail.
+for elapsed, rc, expected in [(150,0,0),(0,0,1),(1000,0,1),(150,127,1)]:
+    check(['verify_delay'], f"""
+monotonic_ms() {{ if [ -e clock ]; then echo {elapsed}; else echo 0; fi; }}
+delay_us() {{ [ "$1" = 150000 ] || exit 90; touch clock; return {rc}; }}
+""", f'verify_delay; [ $? -eq {expected} ] || exit 10')
+check(['delay_us'], r"""
+busybox() { [ "$1" = usleep ] && [ "$2" = 150000 ]; }
+""", 'delay_us 150000 || exit 10')
+# Drain real owned work and its synchronous child; do not orphan a mutator.
+check(['stop_slow_command'], '', r"""
+sh -c 'host_pause 0.08; echo done > completed' &
+SLOW_PID=$!
+stop_slow_command
+[ -e completed ] && [ -z "$SLOW_PID" ] || exit 10
 """)
 print(f'PASS: {COUNT} directional-role, cooperative-work and serial detector scenarios')

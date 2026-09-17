@@ -66,9 +66,9 @@ LOG_MAX_BYTES=524288
 NORD_BACKOFF_SECONDS=900
 NTFY_URL=""
 DEBUG_TIMING=0
-# BusyBox fractional sleep; each completed pass is followed by this delay.
-DETECTOR_DELAY=0.150
-FAST_PROBE_WINDOW=0.200
+# Microseconds; each completed pass is followed by this delay.
+DETECTOR_DELAY_US=150000
+FAST_PROBE_WINDOW_US=200000
 FAST_FAILURE_THRESHOLD=2
 DETECTOR_ENABLED=0
 IN_DETECTOR=0
@@ -197,9 +197,30 @@ acquire_lock() {
     return 0
 }
 
+# BusyBox applets are build-dependent. Both installer and daemon verify elapsed
+# time, not just command existence. No fractional sleep or whole-second fallback.
+delay_us() {
+    busybox usleep "$1"
+}
+
+verify_delay() {
+    local before after elapsed
+    before="$(monotonic_ms)" || return 1
+    delay_us 150000 || return 1
+    after="$(monotonic_ms)" || return 1
+    elapsed=$((after - before))
+    [ "$elapsed" -ge 140 ] && [ "$elapsed" -lt 500 ]
+}
+
 stop_slow_command() {
     [ -n "$SLOW_PID" ] || return 0
-    kill -TERM -- "-$SLOW_PID" 2>/dev/null || true
+    # Drain the one owned command before releasing the daemon lock. Killing only
+    # its shell PID can orphan setup_instance descendants that still change UCI.
+    # Installer stop timeout fails closed while this owner remains alive.
+    trap '' INT TERM
+    while kill -0 "$SLOW_PID" 2>/dev/null; do
+        wait "$SLOW_PID" 2>/dev/null || true
+    done
     wait "$SLOW_PID" 2>/dev/null || true
     SLOW_PID=""
 }
@@ -211,9 +232,9 @@ slow_command() {
         "$@" > "$RUNTIME_DIR/command-output" 2>&1
         return $?
     fi
-    # One supervised command group, never another detector or detached worker.
+    # One owned child command, never another detector or detached worker.
     # The shell owns all promotions; a provider command only prepares an unused slot.
-    setsid "$@" <&0 > "$RUNTIME_DIR/command-output" 2>&1 &
+    "$@" <&0 > "$RUNTIME_DIR/command-output" 2>&1 &
     SLOW_PID=$!
     while kill -0 "$SLOW_PID" 2>/dev/null; do
         detector_iteration
@@ -236,7 +257,7 @@ fast_path_round() {
     # always reaped before returning. No GNU timeout/fractional ping assumption.
     ping -n -I "$iface" -c 1 -W 1 -w 1 1.1.1.1 >/dev/null 2>&1 & first=$!
     ping -n -I "$iface" -c 1 -W 1 -w 1 8.8.8.8 >/dev/null 2>&1 & second=$!
-    sleep "$FAST_PROBE_WINDOW"
+    delay_us "$FAST_PROBE_WINDOW_US" || { kill "$first" "$second" 2>/dev/null; wait "$first"; wait "$second"; exit 1; }
     kill "$first" "$second" 2>/dev/null || true
     wait "$first"; r1=$?
     wait "$second"; r2=$?
@@ -300,7 +321,7 @@ fast_health_pass() {
 detector_iteration() {
     fast_health_pass
     # Delay starts AFTER the complete pass, including any promotion.
-    sleep "$DETECTOR_DELAY"
+    delay_us "$DETECTOR_DELAY_US" || exit 1
 }
 
 policy_section() {
@@ -1791,8 +1812,7 @@ test_failover_once() {
 daemon_loop() {
     acquire_lock || { echo "Hotswapper is already running."; exit 1; }
     local next_slow=0 interval title body
-    # Fail clearly if this BusyBox build lacks fractional sleep/setsid.
-    command -v setsid >/dev/null && sleep "$DETECTOR_DELAY" || return 1
+    verify_delay || { log "Sub-second delay capability failed"; return 1; }
     DETECTOR_ENABLED=1
     refresh_detector_roles
     log "Hotswapper started; serial 150 ms post-pass detector delay"

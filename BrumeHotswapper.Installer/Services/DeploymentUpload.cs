@@ -27,8 +27,10 @@ public sealed class DeploymentUpload(IUploadChannel channel)
         // No remote files: stdin is hashed, allowing a real channel/EOF/binary capability test.
         byte[] probe = Enumerable.Range(0, 65536).Select(x => (byte)x).ToArray();
         bool streamWorks;
+        int? streamExit = null;
         try { streamWorks = (await channel.StreamAsync("sha256sum | awk '{print $1}'", probe, ct)).Trim() == Hash(probe); }
         catch (OperationCanceledException) { throw; }
+        catch (RouterCommandFailure e) { streamExit = e.ExitStatus; streamWorks = false; }
         catch { streamWorks = false; }
         if (streamWorks) { selected = UploadKind.SshStream; return selected.Value; }
         bool sftpWorks;
@@ -37,7 +39,7 @@ public sealed class DeploymentUpload(IUploadChannel channel)
         catch { sftpWorks = false; }
         // Streaming is preferred: supported on the tested router without a subsystem dependency.
         selected = sftpWorks ? UploadKind.Sftp : null;
-        return selected ?? throw new SafeFailure("No verified deployment upload transport is available.");
+        return selected ?? throw new SafeFailure($"Deployment transport capability check failed (SSH stream exit status {streamExit?.ToString() ?? "unavailable"}); output withheld. No verified deployment upload transport is available.");
     }
     public async Task UploadAsync(string path, ReadOnlyMemory<byte> bytes, CancellationToken ct)
     {

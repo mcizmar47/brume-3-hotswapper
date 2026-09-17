@@ -7,6 +7,6 @@ NTFY_URL=''
 # See ../docs/installer.md for the TSV contracts; only the new layout is supported.
 
 # Detector: two failed 200 ms multi-target rounds; 150 ms after each pass.
-# FAST_PROBE_WINDOW=0.200
+# FAST_PROBE_WINDOW_US=200000
 # FAST_FAILURE_THRESHOLD=2
-# DETECTOR_DELAY=0.150
+# DETECTOR_DELAY_US=150000

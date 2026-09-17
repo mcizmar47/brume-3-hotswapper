@@ -172,3 +172,4 @@ print('PASS: shell syntax, rank mapping, guard/housekeeping cases, original data
 import runpy
 runpy.run_path(str(ROOT / 'tooling/test_wan_recovery.py'), run_name='__main__')
 runpy.run_path(str(ROOT / 'tooling/test_directional_runtime.py'), run_name='__main__')
+runpy.run_path(str(ROOT / 'tooling/test_router_platform.py'), run_name='__main__')

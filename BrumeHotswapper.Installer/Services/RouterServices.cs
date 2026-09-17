@@ -162,7 +162,7 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
                     await input.WriteAsync(bytes.Slice(i, Math.Min(8192, bytes.Length - i)), timeout.Token);
                 }
             await execution;
-            if (cmd.ExitStatus != 0) throw new SafeFailure("SSH stream operation failed; details withheld.");
+            if (cmd.ExitStatus != 0) throw new RouterCommandFailure(cmd.ExitStatus);
             if (cmd.Result.Length > 256) throw new SafeFailure("Unexpected SSH stream response.");
             return cmd.Result;
         } catch {
@@ -200,7 +200,7 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
         using var command = ssh.CreateCommand("cat /usr/bin/rtp2.sh");
         command.CommandTimeout = TimeSpan.FromSeconds(12);
         await command.ExecuteAsync(ct);
-        if (command.ExitStatus != 0) throw new SafeFailure("Read-only firmware cat failed; stderr withheld.");
+        if (command.ExitStatus != 0) throw new SafeFailure($"Read-only firmware retrieval failed (exit status {command.ExitStatus}); output withheld.");
         return await FirmwareRead.CopyBoundedAsync(command.OutputStream, ct);
     }
     // Diagnose the old path separately. No upload, remote temporary file or raw exception reporting.

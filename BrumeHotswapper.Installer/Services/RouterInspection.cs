@@ -177,39 +177,51 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
     }
     public async Task<RouterSnapshot> InspectAsync(InstallerConfiguration c, CancellationToken ct)
     {
-        ConfigurationGenerator.Validate(c);
-        using var board = JsonDocument.Parse(await router.ExecuteAsync("ubus call system board", ct));
-        var live = c.Router with { Model = board.RootElement.GetProperty("model").GetString() ?? "", Board = board.RootElement.GetProperty("board_name").GetString() ?? "" };
-        if (!live.IsBrume) throw new SafeFailure("The connected device is not a GL-MT5000.");
-        live = live with { Rtp2Hash = (await router.ExecuteAsync("sha256sum /usr/bin/rtp2.sh | awk '{print $1}'", ct)).Trim() };
-        await RouterPrerequisites.VerifyFirmwareAsync(router, live, ct);
-        await router.ExecuteAsync(RouterPrerequisites.CapabilitiesCommand, ct);
-        var (active, activePeer) = await VerifyPolicySlotsAsync(c.Profile, ct);
-        var policy = Identifier(c.Profile.PolicySection);
-        string group = c.Profile.GroupId, tunnel = c.Profile.TunnelId;
-        var members = ConfigurationGenerator.Locations(c).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Split('\t')[5]).ToHashSet();
-        if (!members.Contains(activePeer)) throw new SafeFailure("The currently active VPN location must be assigned to a tier before installation.");
-        foreach (var peer in c.Tiers.Where(t => t.Tier > 0).SelectMany(t => t.Locations).SelectMany(g => g.Connections))
+        string operation = "device identity and firmware";
+        try
         {
-            var owner = (await router.ExecuteAsync($"uci -q get wireguard.peer_{peer.PeerId}.group_id", ct)).Trim();
-            var location = (await router.ExecuteAsync($"uci -q get wireguard.peer_{peer.PeerId}.location", ct)).Trim();
-            if (owner != group || ExactLocationResolver.Normalize(location) != ExactLocationResolver.Normalize(peer.Location))
-                throw new SafeFailure("VPN pool membership changed. Discover VPN lists again.");
-            await router.ExecuteAsync($"grep -Fxq '{c.Profile.GroupId}_{peer.PeerId}' /etc/vpn_profiles.d/profile{tunnel}", ct);
+            ConfigurationGenerator.Validate(c);
+            using var board = JsonDocument.Parse(await router.ExecuteAsync("ubus call system board", ct));
+            var live = c.Router with { Model = board.RootElement.GetProperty("model").GetString() ?? "", Board = board.RootElement.GetProperty("board_name").GetString() ?? "" };
+            if (!live.IsBrume) throw new SafeFailure("The connected device is not a GL-MT5000.");
+            live = live with { Rtp2Hash = (await router.ExecuteAsync("sha256sum /usr/bin/rtp2.sh | awk '{print $1}'", ct)).Trim() };
+            await RouterPrerequisites.VerifyFirmwareAsync(router, live, ct);
+            await RouterPrerequisites.VerifyCapabilitiesAsync(router, ct);
+            operation = "VPN policy, slot ownership and profile membership";
+            var (active, activePeer) = await VerifyPolicySlotsAsync(c.Profile, ct);
+            var policy = Identifier(c.Profile.PolicySection);
+            string group = c.Profile.GroupId, tunnel = c.Profile.TunnelId;
+            var members = ConfigurationGenerator.Locations(c).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Split('\t')[5]).ToHashSet();
+            if (!members.Contains(activePeer)) throw new SafeFailure("The currently active VPN location must be assigned to a tier before installation.");
+            foreach (var peer in c.Tiers.Where(t => t.Tier > 0).SelectMany(t => t.Locations).SelectMany(g => g.Connections))
+            {
+                var owner = (await router.ExecuteAsync($"uci -q get wireguard.peer_{peer.PeerId}.group_id", ct)).Trim();
+                var location = (await router.ExecuteAsync($"uci -q get wireguard.peer_{peer.PeerId}.location", ct)).Trim();
+                if (owner != group || ExactLocationResolver.Normalize(location) != ExactLocationResolver.Normalize(peer.Location))
+                    throw new SafeFailure("VPN pool membership changed. Discover VPN lists again.");
+                await router.ExecuteAsync($"grep -Fxq '{c.Profile.GroupId}_{peer.PeerId}' /etc/vpn_profiles.d/profile{tunnel}", ct);
+            }
+            operation = "IPv6 configuration";
+            await Ipv6Compatibility.VerifyAsync(router, ct);
+            operation = "selected VPN routing and GL enforcement";
+            await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
+            bool killSwitchEnabled = await KillSwitchVerifier.ReadEnabledAsync(router, c.Profile.PolicySection, ct);
+            operation = "pending DHCP changes";
+            await router.ExecuteAsync("test -z \"$(uci changes dhcp)\"", ct);
+            operation = "installed file metadata";
+            var files = new List<FileState>();
+            foreach (var path in DeploymentPlanning.Paths)
+            {
+                files.Add(FileMetadata.Validate(path, await FileMetadata.ReadAsync(router, path, ct)));
+            }
+            operation = "cron and daemon ownership";
+            var cron = await router.ExecuteAsync("crontab -l 2>/dev/null || true", ct);
+            _ = CronPlanner.Generate(cron, c.Maintenance);
+            var pids = await DaemonPidsAsync(ct);
+            operation = "LAN and maintenance guards";
+            return new(live, c.Profile.PolicySection, active, activePeer, cron, (c.Guards.Count > 0 ? await LanAsync(ct) : new LanInventory(new("0.0.0.0", "0.0.0.0", 0, 0), [], [])), files, pids.Length > 0, killSwitchEnabled);
         }
-        await Ipv6Compatibility.VerifyAsync(router, ct);
-        await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
-        bool killSwitchEnabled = await KillSwitchVerifier.ReadEnabledAsync(router, c.Profile.PolicySection, ct);
-        await router.ExecuteAsync("test -z \"$(uci changes dhcp)\"", ct);
-        var files = new List<FileState>();
-        foreach (var path in DeploymentPlanning.Paths)
-        {
-            files.Add(FileMetadata.Validate(path, await FileMetadata.ReadAsync(router, path, ct)));
-        }
-        var cron = await router.ExecuteAsync("crontab -l 2>/dev/null || true", ct);
-        _ = CronPlanner.Generate(cron, c.Maintenance);
-        var pids = await DaemonPidsAsync(ct);
-        return new(live, c.Profile.PolicySection, active, activePeer, cron, (c.Guards.Count > 0 ? await LanAsync(ct) : new LanInventory(new("0.0.0.0", "0.0.0.0", 0, 0), [], [])), files, pids.Length > 0, killSwitchEnabled);
+        catch (RouterCommandFailure e) { throw new SafeFailure($"Router inspection failed: {operation} (exit status {e.ExitStatus?.ToString() ?? "unknown"}); output withheld."); }
     }
     public async Task<string[]> DaemonPidsAsync(CancellationToken ct) =>
         (await new HotswapRuntime(router).ReadAsync(ct)).Where(p=>p.Kind=="daemon").Select(p=>p.Pid).ToArray();
