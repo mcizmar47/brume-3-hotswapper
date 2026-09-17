@@ -1,3 +1,5 @@
+> Historical record from before the directional-role/layout refactor. For the current implementation, paths, guard hash and validation results, see [Hotswapper runtime](hotswapper-runtime.md).
+
 # Selected GL policy preservation
 
 Hotswapper preserves the selected GL.iNet VPN policy, including either kill-switch setting. It verifies routing/firewall integration required for safe tunnel promotion; it does not certify the router's complete network-security policy.

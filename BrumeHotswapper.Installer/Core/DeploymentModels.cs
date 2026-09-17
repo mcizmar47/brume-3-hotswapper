@@ -14,7 +14,7 @@ public record LanNetwork(string Address, string Netmask, int PoolStart, int Pool
 }
 public record LanInventory(LanNetwork Network, IReadOnlyList<LanClient> Clients, IReadOnlyList<Reservation> Reservations, IReadOnlyList<LanClient>? Observations = null, IReadOnlyList<string>? RouterAddresses = null);
 public record FileState(string Path, string Hash, string Mode, bool Exists);
-public record RouterSnapshot(RouterIdentity Router, string Policy, string ActiveInterface, string ActivePeer,
+public record RouterSnapshot(RouterIdentity Router, string Policy, string CurrentInterface, string CurrentPeer,
     string Cron, LanInventory Lan, IReadOnlyList<FileState> Files, bool WatchdogRunning, bool KillSwitchEnabled = true);
 public record InstallationPlan(InstallerConfiguration Configuration, RouterSnapshot Snapshot,
     IReadOnlyList<ReservationChange> Reservations, string DesiredCron, string GuardAction, IReadOnlyList<string> Changes)
@@ -23,8 +23,8 @@ public record InstallationPlan(InstallerConfiguration Configuration, RouterSnaps
 }
 public static class DeploymentPlanning
 {
-    public static readonly string[] Paths = ["/root/vpn-watch.sh", "/root/vpn-watch-supervisor.sh", "/root/conditional-reboot.sh",
-        "/root/vpn-watch.conf", "/root/vpn-watch-locations.tsv", "/root/reboot-guards.tsv", "/root/install-vpn-watch-gl-guard.sh", "/usr/bin/rtp2.sh"];
+    public static readonly string[] Paths = ["/root/hotswapper-main.sh", "/root/hotswapper-supervisor.sh", "/root/hotswapper-housekeeping.sh",
+        "/root/hotswapper/hotswapper.conf", "/root/hotswapper/hotswapper-locations.tsv", "/root/hotswapper/reboot-guards.tsv", "/root/hotswapper/install-gl-guard.sh", "/usr/bin/rtp2.sh"];
     public static InstallationPlan Create(InstallerConfiguration config, RouterSnapshot snapshot)
     {
         ConfigurationGenerator.Validate(config);
@@ -41,7 +41,7 @@ public static class DeploymentPlanning
         changes.AddRange(reservations.Select(r => $"{(r.Create ? "Create" : "Reuse")} DHCP reservation: {r.Mac} → {r.Ip}"));
         changes.Add("Ensure supervisor schedule occurs once (every five minutes)");
         changes.Add(c.Maintenance ? "Ensure maintenance schedule occurs once (03:00–14:00 hourly)" : "Remove the owned maintenance schedule");
-        changes.Add(snapshot.WatchdogRunning ? "Restart the existing watchdog via supervisor" : "Start watchdog via supervisor");
+        changes.Add(snapshot.WatchdogRunning ? "Restart the existing Hotswapper via supervisor" : "Start Hotswapper via supervisor");
         return new(c, snapshot, reservations, CronPlanner.Generate(snapshot.Cron, c.Maintenance), guard, changes);
     }
     public static string RestoreOwnedCron(string current, string original)
@@ -55,9 +55,9 @@ public static class DeploymentPlanning
 public static class RuntimeValidation
 {
     public static bool ValidStatus(string output) =>
-        System.Text.RegularExpressions.Regex.IsMatch(output, @"(?m)^ACTIVE:\s+wgclient[123] peer=[0-9]+(?: |$)") &&
-        System.Text.RegularExpressions.Regex.IsMatch(output, @"(?m)^PRECOOKED:\s+.+$") &&
-        System.Text.RegularExpressions.Regex.IsMatch(output, @"(?m)^RECOVERY:\s+wgclient[123]\s*$");
+        System.Text.RegularExpressions.Regex.IsMatch(output, @"(?m)^CURRENT:\s+wgclient[123] peer=[0-9]+(?: |$)") &&
+        System.Text.RegularExpressions.Regex.IsMatch(output, @"(?m)^UPTIER:\s+.+$") &&
+        System.Text.RegularExpressions.Regex.IsMatch(output, @"(?m)^DOWNTIER:\s+.+$");
     public static bool IsHealthy(string snapshot, InstallerConfiguration c)
     {
         var rows = snapshot.Split('\n').Where(l => l.Contains('=')).Select(l => l.Split('=', 2)).ToArray();
@@ -65,20 +65,25 @@ public static class RuntimeValidation
         var values = rows.ToDictionary(r => r[0], r => r[1].Trim());
         string Get(string key) => values.GetValueOrDefault(key, "");
         var slots = new[] { "wgclient1", "wgclient2", "wgclient3" };
-        var tierRows = ConfigurationGenerator.Locations(c).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Split('\t')).ToArray();
-        var active = tierRows.SingleOrDefault(r => r[5] == Get("active_peer"));
-        if (active == null || !slots.Contains(Get("active_iface")) || active[0] != Get("active_rank") || active[1] != Get("active_tier")) return false;
-        var used = new[] { Get("active_iface"), Get("standby_iface"), Get("recovery_iface") }.Where(s => s.Length > 0).ToArray();
+        var mapping = ConfigurationGenerator.Locations(c).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Split('\t')).ToArray();
+        var current = mapping.SingleOrDefault(r => r[5] == Get("current_peer"));
+        if (current == null || !slots.Contains(Get("current_iface")) || current[0] != Get("current_rank") || current[1] != Get("current_tier")) return false;
+        var used = new[] { Get("current_iface"), Get("uptier_iface"), Get("downtier_iface") }.Where(s => s.Length > 0).ToArray();
         if (used.Distinct().Count() != used.Length || used.Any(s => !slots.Contains(s))) return false;
-        var next = tierRows.Select(r => int.Parse(r[0])).Distinct().Order().FirstOrDefault(r => r > int.Parse(active[0]));
-        if (Get("standby_iface").Length > 0)
+        int rank = int.Parse(current[0]), tier = int.Parse(current[1]);
+        int next = mapping.Select(r => int.Parse(r[0])).Distinct().Order().FirstOrDefault(r => r > rank);
+        foreach (var role in new[] { "uptier", "downtier" })
         {
-            var standby = tierRows.SingleOrDefault(r => r[5] == Get("standby_peer"));
-            if (standby == null || int.Parse(standby[0]) != next || Get("standby_rank") != standby[0] || Get("standby_tier") != standby[1] || !slots.Contains(Get("standby_iface"))) return false;
+            if (Get(role + "_iface").Length == 0)
+            {
+                if (Get(role + "_peer").Length > 0 || !new[] { "", "0" }.Contains(Get(role + "_rank")) || !new[] { "", "0" }.Contains(Get(role + "_tier"))) return false;
+                continue;
+            }
+            var candidate = mapping.SingleOrDefault(r => r[5] == Get(role + "_peer"));
+            if (candidate == null || candidate[0] != Get(role + "_rank") || candidate[1] != Get(role + "_tier")) return false;
+            if (role == "downtier" ? int.Parse(candidate[0]) != next : tier == 1 || int.Parse(candidate[0]) >= rank || int.Parse(candidate[1]) > 2) return false;
         }
-        else if (Get("standby_peer").Length > 0 || !new[] { "", "0" }.Contains(Get("standby_rank")) || !new[] { "", "0" }.Contains(Get("standby_tier"))) return false;
-        // reconcile_roles may publish no PRECOOKED during backoff or preparation failure.
-        // RECOVERY denotes the remaining slot, not a guaranteed healthy connection.
-        return slots.Contains(Get("recovery_iface"));
+        // An established UPTIER replaces DOWNTIER; a spare slot is not a role.
+        return Get("uptier_iface").Length == 0 || Get("downtier_iface").Length == 0;
     }
 }

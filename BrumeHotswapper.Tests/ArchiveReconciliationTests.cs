@@ -54,7 +54,7 @@ public class ArchiveReconciliationTests
     }
     [Theory]
     [InlineData(2, false)] // sticky Tier 2, unavailable next pool
-    [InlineData(2, true)]  // sticky Tier 2 with PRECOOKED
+    [InlineData(2, true)]  // sticky Tier 2 with DOWNTIER
     [InlineData(3, false)] // Tier 3: recovery slot can be probing a better tier
     [InlineData(1, false)] // Tier 1 with backoff
     public void HealthyActiveDoesNotRequireAvailableStandby(int tier, bool standby)
@@ -68,11 +68,11 @@ public class ArchiveReconciliationTests
         c.Tiers[2].Locations.Add(resolver.Group([peers[1], peers[3]])[0]);
         c.Tiers[3].Locations.Add(resolver.Group([peers[2]])[0]);
         var peer = tier == 2 ? "14" : tier == 1 ? "11" : "13";
-        string state = $"active_iface=wgclient2\nactive_peer={peer}\nactive_rank={tier}\nactive_tier={tier}\nrecovery_iface=wgclient1\n" +
-            (standby ? "standby_iface=wgclient3\nstandby_peer=13\nstandby_rank=3\nstandby_tier=3\n" : "standby_iface=\nstandby_peer=\nstandby_rank=0\nstandby_tier=0\n");
+        string state = $"current_iface=wgclient2\ncurrent_peer={peer}\ncurrent_rank={tier}\ncurrent_tier={tier}\nuptier_iface=\n" +
+            (standby ? "downtier_iface=wgclient3\ndowntier_peer=13\ndowntier_rank=3\ndowntier_tier=3\n" : "downtier_iface=\ndowntier_peer=\ndowntier_rank=0\ndowntier_tier=0\n");
         Assert.True(RuntimeValidation.IsHealthy(state, c));
-        Assert.False(RuntimeValidation.IsHealthy(state.Replace("recovery_iface=wgclient1", "recovery_iface=wgclient2"), c));
-        if (standby) Assert.False(RuntimeValidation.IsHealthy(state.Replace("standby_rank=3", "standby_rank=1"), c));
+        Assert.False(RuntimeValidation.IsHealthy(state.Replace("uptier_iface=", "uptier_iface=wgclient2"), c));
+        if (standby) Assert.False(RuntimeValidation.IsHealthy(state.Replace("downtier_rank=3", "downtier_rank=1"), c));
     }
     [Theory]
     [InlineData("upload")]
@@ -87,7 +87,7 @@ public class ArchiveReconciliationTests
         bool fired = false;
         void Fail(string cmd, string expected)
         { if (!fired && cmd.Contains(expected)) { fired = true; throw new OperationCanceledException("synthetic-secret-must-not-escape"); } }
-        if (boundary == "upload") router.Upload = p => { if (p.EndsWith("/vpn-watch.conf")) fake.Uploads[p] = "partial upload"; Fail(p, "/vpn-watch.conf"); };
+        if (boundary == "upload") router.Upload = p => { if (p.EndsWith("/hotswapper.conf")) fake.Uploads[p] = "partial upload"; Fail(p, "/hotswapper.conf"); };
         if (boundary == "file-before") router.Before = p => Fail(p, "cp -p");
         if (boundary == "file-after") router.After = p => Fail(p, "cp -p");
         if (boundary == "cron") router.Before = p => Fail(p, "&& crontab");
@@ -100,10 +100,10 @@ public class ArchiveReconciliationTests
         var fake = new RouterFixture(); var router = new Intercept(fake);
         var installer = new RouterInstaller(router, new VerifiedKillSwitch());
         var plan = await installer.PlanAsync(Config(), default);
-        router.After = cmd => { if (cmd.StartsWith("rm -f /tmp/vpn-watch/state")) throw new IOException("synthetic-secret"); };
+        router.After = cmd => { if (cmd.StartsWith("rm -f /tmp/hotswapper/state")) throw new IOException("synthetic-secret"); };
         var error = await Assert.ThrowsAsync<SafeFailure>(() => installer.InstallAsync(plan, new Progress<string>(), default));
         Assert.Contains("rolled back", error.Message); Assert.Empty(fake.Installed);
-        Assert.Contains(router.Commands, c => c.Contains("rm -rf /root/.hotswap-installer/run-"));
+        Assert.Contains(router.Commands, c => c.Contains("rm -rf /root/hotswapper/installer/run-"));
         Assert.False(fake.Running); Assert.DoesNotContain("synthetic-secret", error.Message);
     }
     [Fact] public async Task CleanupFailureDoesNotUndoValidatedInstallation()
@@ -111,7 +111,7 @@ public class ArchiveReconciliationTests
         var fake = new RouterFixture(); var router = new Intercept(fake);
         var installer = new RouterInstaller(router, new VerifiedKillSwitch());
         var plan = await installer.PlanAsync(Config(), default);
-        router.Before = cmd => { if (cmd.Contains("rm -rf /root/.hotswap-installer/run-")) throw new IOException(); };
+        router.Before = cmd => { if (cmd.Contains("rm -rf /root/hotswapper/installer/run-")) throw new IOException(); };
         var result = await installer.InstallAsync(plan, new Progress<string>(), default);
         Assert.True(result.Success); Assert.True(fake.Running); Assert.Equal(7, fake.Installed.Count);
     }
@@ -120,7 +120,7 @@ public class ArchiveReconciliationTests
         var fake = new RouterFixture(); var router = new Intercept(fake);
         var installer = new RouterInstaller(router, new VerifiedKillSwitch());
         var plan = await installer.PlanAsync(Config(), default);
-        router.After = cmd => { if (cmd.Contains("mkdir -p /root/.hotswap-installer/backups")) fake.Cron += "22 2 * * * /root/new-user-job\n"; };
+        router.After = cmd => { if (cmd.Contains("mkdir -p /root/hotswapper/installer/backups")) fake.Cron += "22 2 * * * /root/new-user-job\n"; };
         await installer.InstallAsync(plan, new Progress<string>(), default);
         Assert.Contains("/root/new-user-job", fake.Cron);
     }
@@ -175,11 +175,11 @@ public class ArchiveReconciliationTests
         var error = await Assert.ThrowsAsync<SafeFailure>(() => installer.InstallAsync(plan, new Progress<string>(), default));
         Assert.Contains("retained for reuse", error.Message);
         Assert.DoesNotContain(router.Commands, cmd => cmd.Contains("uci delete"));
-        Assert.Contains(router.Commands,cmd=>cmd.Contains("rm -rf /root/.hotswap-installer/run-"));
+        Assert.Contains(router.Commands,cmd=>cmd.Contains("rm -rf /root/hotswapper/installer/run-"));
         Assert.DoesNotContain(fake.Uploads.Keys,k=>k.EndsWith("journal.json"));
     }
-    [Fact] public void HistoricalPatchHashRetainsVariantIdentity()
+    [Fact] public void OldDirectoryGuardIsNotClassifiedAsCurrentCompatible()
     {
-        Assert.Equal(Compatibility.HistoricalGuardKnownCompatible, CompatibilityCatalog.Classify("5b1a898d8a4943d256f0674c0050519f1ec1353327f7de0778e1c760d3e57704"));
+        Assert.Equal(Compatibility.Unknown, CompatibilityCatalog.Classify("5b1a898d8a4943d256f0674c0050519f1ec1353327f7de0778e1c760d3e57704"));
     }
 }

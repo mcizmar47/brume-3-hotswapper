@@ -83,7 +83,7 @@ public static class FileMetadata
         void Check(string field,bool pass,string detail)=>checks.Add(new(field,pass?"PASS":"BLOCK",detail));
         Check("symlink",Get("symlink")=="0","Expected no symlink.");
         if(Get("exists")=="0") {
-            checks.Add(new("existence",path=="/usr/bin/rtp2.sh"?"BLOCK":"WARN",path is "/root/vpn-watch-locations.tsv" or "/root/reboot-guards.tsv"?"Expected legacy absence; generated file is required after installation.":"Absent."));
+            checks.Add(new("existence",path=="/usr/bin/rtp2.sh"?"BLOCK":"WARN",path is "/root/hotswapper/hotswapper-locations.tsv" or "/root/hotswapper/reboot-guards.tsv"?"Generated file is required after installation.":"Absent."));
             return checks;
         }
         Check("exists",Get("exists")=="1","Expected existing file.");
@@ -92,7 +92,7 @@ public static class FileMetadata
         foreach(var key in new[]{"uid","gid"}) Check(key,Get(key)=="0",key.ToUpperInvariant()+"="+(uint.TryParse(Get(key),out _)?Get(key):"unavailable")+"; expected 0.");
         string mode=Get("mode"),expected=path=="/usr/bin/rtp2.sh"?"755":path.EndsWith(".sh")?"700":"600";
         bool safe=SafeMode(path,mode), exact=safe && Convert.ToInt32(mode,8)==Convert.ToInt32(expected,8);
-        checks.Add(new("mode",!safe?"BLOCK":exact?"PASS":"WARN","Observed "+(Regex.IsMatch(mode,@"\A[0-7]{3,4}\z")?mode:"unavailable")+"; expected "+expected+(safe&&!exact?"; safe legacy normalization during installation.":".")));
+        checks.Add(new("mode",!safe?"BLOCK":exact?"PASS":"WARN","Observed "+(Regex.IsMatch(mode,@"\A[0-7]{3,4}\z")?mode:"unavailable")+"; expected "+expected+(safe&&!exact?"; safe permission normalization during installation.":".")));
         Check("hash",Regex.IsMatch(Get("sha256"),@"\A[a-fA-F0-9]{64}\z"),"SHA-256 format/readability checked; private hashes withheld.");
         Check("size",long.TryParse(Get("size"),out long size)&&size>=0,"Size: "+(long.TryParse(Get("size"),out size)?size.ToString():"unavailable"));
         return checks;

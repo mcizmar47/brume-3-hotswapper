@@ -19,7 +19,7 @@ public sealed class DeploymentUpload(IUploadChannel channel)
     public static string Hash(ReadOnlySpan<byte> data) => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
     public static void ValidatePath(string path)
     {
-        if (!Regex.IsMatch(path, @"^/root/\.hotswap-installer/run-[a-f0-9]{32}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\z"))
+        if (!Regex.IsMatch(path, @"^/root/hotswapper/installer/run-[a-f0-9]{32}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\z"))
             throw new SafeFailure("Upload destination is outside installer staging or has unsupported characters.");
     }
     public async Task<UploadKind> ProbeAsync(CancellationToken ct)
@@ -47,8 +47,8 @@ public sealed class DeploymentUpload(IUploadChannel channel)
         var kind = selected ?? await ProbeAsync(ct);
         string stage = path[..path.LastIndexOf('/')];
         string temporary = stage + "/.upload-" + Guid.NewGuid().ToString("N");
-        string guard = $"test ! -L /root/.hotswap-installer && test ! -L {stage} && test -d {stage} && test \"$(id -u)\" = 0 && {FileMetadata.MatchesCommand(stage, "700", 'd')}";
-        string cleanup = $"if test ! -L /root/.hotswap-installer && test ! -L {stage}; then rm -f '{temporary}'; fi";
+        string guard = $"test ! -L /root/hotswapper/installer && test ! -L {stage} && test -d {stage} && test \"$(id -u)\" = 0 && {FileMetadata.MatchesCommand(stage, "700", 'd')}";
+        string cleanup = $"if test ! -L /root/hotswapper/installer && test ! -L {stage}; then rm -f '{temporary}'; fi";
         try
         {
             string prepare = guard + $" || exit 1; test ! -L '{path}' || exit 1; umask 077; set -C; ";

@@ -31,7 +31,7 @@ public sealed class DemoRouterSession : IRouterSession
     {
         foreach (var step in InstallationPlanner.Create(c)) { progress.Report("DEMO · " + step.Name); await Task.Delay(350, ct); }
         return new(true, ["DEMO · script permissions valid", "DEMO · GL guard installed", "DEMO · one watchdog daemon running",
-            "DEMO · ACTIVE / PRECOOKED / RECOVERY topology healthy", "DEMO · kill switch enabled", "DEMO · configuration and cron valid", "No real router operations were performed."]);
+            "DEMO · CURRENT / DOWNTIER / UPTIER topology healthy", "DEMO · kill switch enabled", "DEMO · configuration and cron valid", "No real router operations were performed."]);
     }
     public void Dispose() { }
 }

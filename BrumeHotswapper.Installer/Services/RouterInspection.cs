@@ -29,19 +29,19 @@ public sealed class KillSwitchVerifier : IKillSwitchVerifier
         if (!Regex.IsMatch(mark, "^0x[0-9a-fA-F]{1,8}$")) throw new SafeFailure("The selected policy has no interpretable routing mark.");
         uint selectedMark = Convert.ToUInt32(mark[2..], 16);
         var active = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim();
-        // Contract used by vpn-watch.sh fastpath_mark_for_iface and fastpath_verify_kernel.
+        // Contract used by hotswapper-main.sh fastpath_mark_for_iface and fastpath_verify_kernel.
         if (!new[] { "wgclient1", "wgclient2", "wgclient3" }.Contains(active) || selectedMark != (uint)(active[^1] - '0') * 0x1000)
-            throw new SafeFailure("The selected mark does not match the ACTIVE runtime slot.");
+            throw new SafeFailure("The selected mark does not match the CURRENT runtime slot.");
         var rules = await router.ExecuteAsync("ip -4 rule show", ct);
         var selected = rules.Split('\n').Where(l => l.Contains($"fwmark {mark}/0xf000 ") && !Regex.IsMatch(l, @"\bnot\b")).ToArray();
         string table = "100" + active[^1];
         if (selected.Length != 1 || !Regex.IsMatch(selected[0], $@"^\s*\d+:\s+from all fwmark {Regex.Escape(mark)}/0xf000 lookup {table}\s*$"))
-            throw new SafeFailure("The selected mark does not uniquely map to the expected ACTIVE routing table.");
+            throw new SafeFailure("The selected mark does not uniquely map to the expected CURRENT routing table.");
         var routes = await router.ExecuteAsync($"ip -4 route show table {table}", ct);
         var defaults = routes.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("default ")).ToArray();
-        // Unconditional: OFF never waives ACTIVE routing correctness.
+        // Unconditional: OFF never waives CURRENT routing correctness.
         if (defaults.Length != 1 || !Regex.IsMatch(defaults[0], $@"^default dev {Regex.Escape(active)}(?: |$)") || !SelectedRoutesSafe(routes, active))
-            throw new SafeFailure("The selected routing table does not route through the expected ACTIVE WireGuard interface.");
+            throw new SafeFailure("The selected routing table does not route through the expected CURRENT WireGuard interface.");
         if (enabled)
         {
             var chain = "TUNNEL" + tunnel + "_ROUTE_POLICY";
@@ -138,7 +138,7 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
         var owned = local.Split('\n').Select(l => l.Split('/')[0]).ToHashSet();
         return new(network, clients.Values.Where(c => !owned.Contains(c.Ip)).OrderBy(c => c.Hostname).ToArray(), reservations, observations, owned.ToArray());
     }
-    public async Task<(string ActiveInterface,string ActivePeer)> VerifyPolicySlotsAsync(VpnProfile profile,CancellationToken ct)
+    public async Task<(string CurrentInterface,string CurrentPeer)> VerifyPolicySlotsAsync(VpnProfile profile,CancellationToken ct)
     {
         var policy = Identifier(profile.PolicySection);
         string group = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.group_id", ct)).Trim();

@@ -15,7 +15,7 @@ Run:
     python vpn_swap_measure.py
 
 Then trigger the Brume failover in another terminal:
-    /root/vpn-watch.sh test_failover
+    /root/hotswapper-main.sh test_failover
 
 Stop with Ctrl+C. A CSV is written beside the script.
 """

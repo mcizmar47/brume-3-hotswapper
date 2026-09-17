@@ -1,13 +1,11 @@
 #!/bin/sh
 
-WATCH="/root/vpn-watch.sh"
-RUNTIME_DIR="/tmp/vpn-watch"
+WATCH="/root/hotswapper-main.sh"
+RUNTIME_DIR="/tmp/hotswapper"
 LOCK_DIR="$RUNTIME_DIR/lock"
 PID_FILE="$LOCK_DIR/pid"
-TAG="vpn-watch-supervisor"
+TAG="hotswapper-supervisor"
 
-# Installer owns replacement/startup while this lock exists; cron waits.
-[ -d /tmp/vpn-watch-installer-lock ] && [ "${1:-}" != "--installer" ] && exit 0
 mkdir -p "$RUNTIME_DIR"
 # Serialize supervisor launches. A stale startup lock requires inspection rather
 # than deleting another process's daemon lock during a startup race.
@@ -20,7 +18,7 @@ pid_is_our_daemon() {
     kill -0 "$pid" 2>/dev/null || return 1
     [ -r "/proc/$pid/cmdline" ] || return 1
     cmd="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
-    echo "$cmd" | grep -Fq '/root/vpn-watch.sh' || return 1
+    echo "$cmd" | grep -Fq '/root/hotswapper-main.sh' || return 1
     echo "$cmd" | grep -Fq 'daemon' || return 1
     return 0
 }
@@ -33,7 +31,7 @@ if [ -f "$PID_FILE" ]; then
 fi
 
 # The watchdog owns stale daemon-lock recovery; the supervisor must not delete it.
-logger -t "$TAG" "vpn-watch is not running; starting daemon" 2>/dev/null || true
+logger -t "$TAG" "hotswapper is not running; starting daemon" 2>/dev/null || true
 
 (
     trap '' HUP

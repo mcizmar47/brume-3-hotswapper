@@ -1,3 +1,5 @@
+> Historical record from before the directional-role/layout refactor. For the current implementation, paths, guard hash and validation results, see [Hotswapper runtime](hotswapper-runtime.md).
+
 # Guard hash investigation and review of 1916787
 
 ## Result

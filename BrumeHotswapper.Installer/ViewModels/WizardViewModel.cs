@@ -64,7 +64,6 @@ public sealed class WizardViewModel : Observable, IDisposable
         + "\n\n" + (CompatibilityCatalog.Classify(Router.Rtp2Hash) switch
         {
             Compatibility.StockKnownCompatible => "Known compatible GL VPN implementation.",
-            Compatibility.HistoricalGuardKnownCompatible => "Verified historical GL reconciliation guard detected.",
             Compatibility.AlreadyPatchedKnownCompatible => "Existing GL reconciliation guard detected.",
             Compatibility.KnownIncompatible => "This GL VPN implementation is known to be incompatible. Installation cannot continue.",
             _ => "The GL VPN reconciliation implementation is unknown. Installation is blocked until its compatibility is established."
@@ -156,7 +155,7 @@ public sealed class WizardViewModel : Observable, IDisposable
     }
     private static string BuildReview(InstallerConfiguration c) => $"ROUTER\n{c.Router.Model} · {c.Router.Address}\nFirmware: {c.Router.Firmware} · {(CompatibilityCatalog.TestedFirmware.Contains(c.Router.Firmware) ? "tested" : "untested")}\nrtp2: {CompatibilityCatalog.Classify(c.Router.Rtp2Hash)}\nVPN list: {c.Profile.Display}\n\nVPN LOCATIONS\n"
         + string.Join("\n\n", c.Tiers.Select(t => t.Title + "\n" + (t.Locations.Count == 0 ? "  None" : string.Join('\n', t.Locations.Select((g, i) => $"  {i + 1}. {g.Label} ({g.Connections.Count} connections)")))))
-        + $"\n\nNotifications: {(c.Notifications ? "Enabled (private URL hidden)" : "Disabled")}\nMaintenance reboot: {(c.Maintenance ? "Enabled · 03:00–14:00 hourly, router time" : "Disabled · script still installed")}\nReboot guards: {string.Join(", ", c.Guards.Select(g => g.Hostname))}\n\nCOMPONENTS\nVPN Watch · supervisor · conditional reboot · GL reconciliation guard\nPrivate configuration · location pools · supervisor cron every 5 minutes\n\nThe selected VPN connection will be checked again before applying these changes. No router reboot or synthetic failover will be performed.";
+        + $"\n\nNotifications: {(c.Notifications ? "Enabled (private URL hidden)" : "Disabled")}\nMaintenance reboot: {(c.Maintenance ? "Enabled · 03:00–14:00 hourly, router time" : "Disabled · script still installed")}\nReboot guards: {string.Join(", ", c.Guards.Select(g => g.Hostname))}\n\nCOMPONENTS\nHotswapper · supervisor · housekeeping · GL reconciliation guard\nPrivate configuration · location pools · supervisor cron every 5 minutes\n\nThe selected VPN connection will be checked again before applying these changes. No router reboot or synthetic failover will be performed.";
     public void Move(VpnLocationGroup group, TierColumn target, int index)
     {
         if (Busy) return;

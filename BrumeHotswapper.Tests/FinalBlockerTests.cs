@@ -6,29 +6,29 @@ using BrumeHotswapper.Preflight;
 namespace BrumeHotswapper.Tests;
 public class FinalBlockerTests
 {
-    private const string TestStage = "/root/.hotswap-installer/run-0123456789abcdef0123456789abcdef";
-    [Fact] public async Task HistoricalGuardIsPreservedByTransaction()
+    private const string TestStage = "/root/hotswapper/installer/run-0123456789abcdef0123456789abcdef";
+    [Fact] public async Task CurrentGuardIsPreservedByRepair()
     {
-        var router = new SecondPassTests.RouterFixture { FirmwareHash = CompatibilityCatalog.HistoricalPatchedHash };
+        var router = new SecondPassTests.RouterFixture { FirmwareHash = CompatibilityCatalog.PatchedHash };
         var installer = new RouterInstaller(router, new AcceptKill());
-        var plan = await installer.PlanAsync(SecondPassTests.Config(CompatibilityCatalog.HistoricalPatchedHash), default);
+        var plan = await installer.PlanAsync(SecondPassTests.Config(CompatibilityCatalog.PatchedHash), default);
         await installer.InstallAsync(plan, new Progress<string>(), default);
         Assert.Equal(0, router.RealPatches);
-        Assert.Equal(CompatibilityCatalog.HistoricalPatchedHash, router.FirmwareHash);
+        Assert.Equal(CompatibilityCatalog.PatchedHash, router.FirmwareHash);
     }
     private sealed class AcceptKill : IKillSwitchVerifier { public Task VerifyAsync(IRouterTransport r,string p,CancellationToken ct)=>Task.CompletedTask; }
     [Fact] public async Task BusyBoxFieldsAreIndependentAndTrimmed()
     {
-        var fields = await FileMetadata.ReadAsync(new MetadataFixture(), "/root/vpn-watch.sh", default);
+        var fields = await FileMetadata.ReadAsync(new MetadataFixture(), "/root/hotswapper-main.sh", default);
         Assert.Equal("0", fields["uid"]); Assert.Equal("755", fields["mode"]); Assert.Equal("81001", fields["size"]);
-        Assert.True(FileMetadata.Validate("/root/vpn-watch.sh", fields).Exists);
-        Assert.All(FileMetadata.Commands("/root/vpn-watch.sh").Values, command => Assert.True(ReadOnlyTransport.IsAllowed(command)));
+        Assert.True(FileMetadata.Validate("/root/hotswapper-main.sh", fields).Exists);
+        Assert.All(FileMetadata.Commands("/root/hotswapper-main.sh").Values, command => Assert.True(ReadOnlyTransport.IsAllowed(command)));
     }
     private sealed class MetadataFixture : IRouterTransport {
         public Task UploadAsync(string p,string s,CancellationToken ct)=>throw new Exception();
         public Task<string> ExecuteAsync(string c,CancellationToken ct)=>Task.FromResult(c switch {
             var x when x.StartsWith("if [ -L") => "0\r\n", var x when x.StartsWith("if [") => "1\n",
-            var x when x.StartsWith("LC_ALL=C ls -ldn ") => "-rwxr-xr-x    1 0 0 55880 Jan 1 00:00 /root/vpn-watch.sh\n",
+            var x when x.StartsWith("LC_ALL=C ls -ldn ") => "-rwxr-xr-x    1 0 0 55880 Jan 1 00:00 /root/hotswapper-main.sh\n",
             var x when x.StartsWith("wc -c") => "   81001\n",
             var x when x.StartsWith("sha256sum") => new string('a',64)+"\n", _=>throw new Exception() });
     }
@@ -55,9 +55,9 @@ public class FinalBlockerTests
         await Assert.ThrowsAsync<OperationCanceledException>(()=>new DeploymentUpload(ch).UploadAsync(TestStage+"/payload", new byte[20000], default));
         Assert.False(ch.Published); Assert.True(ch.Cleaned);
     }
-    [Theory] [InlineData("/root/final")] [InlineData("/root/.hotswap-installer/run-0123456789abcdef0123456789abcdef/../final")]
-    [InlineData("/root/.hotswap-installer/run-0123456789abcdef0123456789abcdef/a';reboot")]
-    [InlineData("/root/.hotswap-installer/transaction/owner")]
+    [Theory] [InlineData("/root/final")] [InlineData("/root/hotswapper/installer/run-0123456789abcdef0123456789abcdef/../final")]
+    [InlineData("/root/hotswapper/installer/run-0123456789abcdef0123456789abcdef/a';reboot")]
+    [InlineData("/root/hotswapper/installer/transaction/owner")]
     public void UnsafePathsRejectBeforeChannel(string path) => Assert.Throws<SafeFailure>(()=>DeploymentUpload.ValidatePath(path));
     [Fact] public async Task CapabilitiesSelectStreamWithoutSftpAndBlockIfBothFail()
     {

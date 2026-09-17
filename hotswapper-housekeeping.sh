@@ -1,11 +1,11 @@
 #!/bin/sh
 
-GUARD_FILE="/root/reboot-guards.tsv"
-STATE_FILE="/root/.conditional-reboot-last-date"
-TAG="conditional-reboot"
+GUARD_FILE="/root/hotswapper/reboot-guards.tsv"
+STATE_FILE="/root/hotswapper/state/housekeeping-last-date"
+TAG="hotswapper-housekeeping"
 
-VPN_WATCH="/root/vpn-watch.sh"
-VPN_RUNTIME_DIR="/tmp/vpn-watch"
+HOTSWAPPER="/root/hotswapper-main.sh"
+VPN_RUNTIME_DIR="/tmp/hotswapper"
 VPN_PID_FILE="$VPN_RUNTIME_DIR/lock/pid"
 VPN_REQUEST_FILE="$VPN_RUNTIME_DIR/pre-reboot-request"
 VPN_RESULT_FILE="$VPN_RUNTIME_DIR/pre-reboot-result"
@@ -62,8 +62,8 @@ else
 fi
 
 # Before reboot, give a sticky Tier 2 session one deliberate chance to return
-# to Tier 1. The actual VPN manipulation is still performed by vpn-watch.
-if [ -x "$VPN_WATCH" ]; then
+# to Tier 1. The actual VPN manipulation is still performed by hotswapper.
+if [ -x "$HOTSWAPPER" ]; then
     mkdir -p "$VPN_RUNTIME_DIR"
     rm -f "$VPN_RESULT_FILE"
 
@@ -74,8 +74,8 @@ if [ -x "$VPN_WATCH" ]; then
         token="reboot-$$-$(date +%s)"
         printf '%s\n' "$token" > "$VPN_REQUEST_FILE"
 
-        logger -t "$TAG" "Requested pre-reboot Tier 2 -> Tier 1 recovery from vpn-watch daemon."
-        echo "Waiting for vpn-watch pre-reboot recovery result..."
+        logger -t "$TAG" "Requested pre-reboot Tier 2 -> Tier 1 recovery from hotswapper daemon."
+        echo "Waiting for hotswapper pre-reboot recovery result..."
 
         waited=0
         result=""
@@ -107,10 +107,10 @@ if [ -x "$VPN_WATCH" ]; then
                 ;;
         esac
     else
-        logger -t "$TAG" "vpn-watch daemon not running; performing pre-reboot recovery synchronously."
-        echo "vpn-watch daemon not running; attempting synchronous pre-reboot recovery."
+        logger -t "$TAG" "hotswapper daemon not running; performing pre-reboot recovery synchronously."
+        echo "hotswapper daemon not running; attempting synchronous pre-reboot recovery."
 
-        if "$VPN_WATCH" pre_reboot_recover; then
+        if "$HOTSWAPPER" pre_reboot_recover; then
             logger -t "$TAG" "Synchronous pre-reboot VPN recovery completed successfully."
         else
             logger -t "$TAG" "Synchronous pre-reboot VPN recovery completed with failure; proceeding with reboot."

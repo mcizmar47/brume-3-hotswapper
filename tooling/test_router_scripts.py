@@ -11,7 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SH = sys.argv[1] if len(sys.argv) > 1 else "sh"
 if pathlib.Path(SH).is_absolute():
     os.environ['PATH'] = str(pathlib.Path(SH).parent) + os.pathsep + os.environ.get('PATH', '')
-watch = (ROOT / "vpn-watch.sh").read_text(encoding="utf-8")
+watch = (ROOT / "hotswapper-main.sh").read_text(encoding="utf-8")
 
 def run(code, expected=0):
     result = subprocess.run([SH, "-c", code], capture_output=True, text=True)
@@ -22,7 +22,7 @@ for path in list(ROOT.glob("*.sh")) + list((ROOT / "firmware").glob("*.sh")):
     subprocess.run([SH, "-n", str(path)], check=True)
 
 def function(name):
-    start = watch.index(name + "() {")
+    start = watch.index("\n" + name + "() {") + 1
     return watch[start:watch.index("\n}", start) + 2]
 
 with tempfile.TemporaryDirectory(prefix="brume-shell-") as directory:
@@ -46,22 +46,6 @@ with tempfile.TemporaryDirectory(prefix="brume-shell-") as directory:
     run(command, 1)  # A valid old backup must not hide a changed source file.
     original_file.write_bytes(backup_file.read_bytes())
     run(command)
-    # Execute the production legacy-bookkeeping archive command; do not read/replay a journal.
-    statement = next(line for line in installer.splitlines() if 'then mv {Q(legacy)}' in line)
-    archive_command = statement.split('ExecuteAsync($"', 1)[1].rsplit('", ct)', 1)[0]
-    legacy = directory / 'transaction'
-    archive = directory / 'legacy-unique-transaction'
-    legacy.mkdir()
-    (legacy / 'journal.json').write_text('incomplete stale intent', encoding='utf-8')
-    live_file = directory / 'live-config'
-    live_file.write_text('current configuration', encoding='utf-8')
-    archive_command = archive_command.replace('{Q(legacy)}', "'" + legacy.as_posix() + "'")
-    archive_command = archive_command.replace('{Q(Home + "/legacy-" + suffix + "-" + Path.GetFileName(legacy))}', "'" + archive.as_posix() + "'")
-    run(archive_command)
-    run(archive_command)  # already absent is an idempotent success
-    assert not legacy.exists()
-    assert (archive / 'journal.json').read_text() == 'incomplete stale intent'
-    assert live_file.read_text() == 'current configuration'
     locations = directory / "locations.tsv"
     locations.write_text("1\t1\t1\taaa\tGermany / Frankfurt\t11\n2\t1\t2\tbbb\tGermany / Berlin\t12\n3\t2\t1\tccc\tFrance / Paris\t13\n4\t3\t1\tddd\tJapan / Tokyo\t14\n", encoding="utf-8")
     definitions = '\n'.join(function(name) for name in ["peer_rank", "peer_tier", "rank_major_tier", "rank_label", "rank_order", "tier1_ranks", "recovery_ranks"])
@@ -71,7 +55,7 @@ with tempfile.TemporaryDirectory(prefix="brume-shell-") as directory:
     assert run(prefix + 'peer_tier 12') == '1'
     assert run(prefix + 'rank_label 3') == 'France / Paris'
     assert run(prefix + 'tier1_ranks') == '1\n2'
-    assert run(prefix + 'recovery_ranks 3') == ''  # sticky Tier 2
+    assert run(prefix + 'recovery_ranks 3') == '1\n2'  # Tier 2 prepares upward, stays sticky
     assert run(prefix + 'recovery_ranks 4') == '1\n2\n3'  # Tier 3 recovers best-to-worst
     # The captured GL profile format is numeric group_peer, never peer_peerID.
     profile = directory / 'profile42'
@@ -80,13 +64,13 @@ with tempfile.TemporaryDirectory(prefix="brume-shell-") as directory:
     membership = f"PROFILE_FILE='{profile.as_posix()}'\n" + definitions + '\n' + function('profile_peers_for_rank') + '\n'
     assert run(membership + f"LOCATION_FILE='{locations.as_posix()}'\nprofile_peers_for_rank 1", expected=1) == '11'
     target = directory / 'rtp2.sh'
-    patcher = (ROOT / 'firmware/install-vpn-watch-gl-guard.sh').as_posix()
+    patcher = (ROOT / 'firmware/install-gl-guard.sh').as_posix()
     target.write_text('#!/bin/sh\ncmd="$1";shift\n', encoding='utf-8')
-    assert 'MATCH:' in run(f"VPN_WATCH_RTP2_TARGET='{target.as_posix()}' sh '{patcher}' --check")
+    assert 'MATCH:' in run(f"HOTSWAPPER_RTP2_TARGET='{target.as_posix()}' sh '{patcher}' --check")
     target.write_text('#!/bin/sh\n# unexpected firmware\n', encoding='utf-8')
-    run(f"VPN_WATCH_RTP2_TARGET='{target.as_posix()}' sh '{patcher}' --check", 1)
+    run(f"HOTSWAPPER_RTP2_TARGET='{target.as_posix()}' sh '{patcher}' --check", 1)
 
-    reboot = (ROOT / 'conditional-reboot.sh').read_text(encoding='utf-8')
+    reboot = (ROOT / 'hotswapper-housekeeping.sh').read_text(encoding='utf-8')
     start = reboot.index('    # A missing, unreadable or malformed guard file')
     end = reboot.index('\nelse\n', start)
     guard_checks = reboot[start:end]  # only presence checks; no daily marker or reboot code
@@ -126,7 +110,7 @@ uci() {
 monotonic_ms() { echo 1; }
 policy_section() { echo vpn; }
 peer_tier() { echo 1; }
-active_iface() { echo "$via"; }
+current_iface() { echo "$via"; }
 fastpath_verify_consistency() { [ "$fail" = 0 ]; }
 """
 for name in ['promo_trace','log','iface_healthy','probe_iface_path','fastpath_verify_kernel','acquire_gl_guard','release_gl_guard','fastpath_prepare_firewall','fastpath_install_mark_override','peer_location','peer_name','iface_summary','notify']:
@@ -151,31 +135,40 @@ match_function = json.loads(match_line.split(' = ',1)[1].rstrip(';'))
 with tempfile.TemporaryDirectory(prefix='brume-argv-') as local:
     cmdline = pathlib.Path(local) / 'cmdline'
     for argv, expected in [
-        (['/bin/sh','/root/vpn-watch.sh','daemon'],'daemon'),
-        (['/root/vpn-watch.sh','run'],'daemon'),
-        (['/bin/sh','/root/vpn-watch-supervisor.sh','--installer'],'supervisor'),
-        (['/root/vpn-watch-supervisor.sh'],'supervisor'),
-        (['/bin/sh','-c','/root/vpn-watch.sh daemon'],''),
-        (['/root/vpn-watch.sh daemon'],''),
-        (['/root/not-vpn-watch.sh','daemon'],''),
-        (['/root/vpn-watch.sh','status'],''),
-        (['/root/vpn-watch.sh','daemon','extra'],''),
+        (['/bin/sh','/root/hotswapper-main.sh','daemon'],'daemon'),
+        (['/root/hotswapper-main.sh','run'],'daemon'),
+        (['/bin/sh','/root/hotswapper-supervisor.sh','--installer'],'supervisor'),
+        (['/root/hotswapper-supervisor.sh'],'supervisor'),
+        (['/bin/sh','-c','/root/hotswapper-main.sh daemon'],''),
+        (['/root/hotswapper-main.sh daemon'],''),
+        (['/root/not-hotswapper-main.sh','daemon'],''),
+        (['/root/hotswapper-main.sh','status'],''),
+        (['/root/hotswapper-main.sh','daemon','extra'],''),
     ]:
         cmdline.write_bytes(b'\0'.join(a.encode() for a in argv)+b'\0')
         assert run(match_function + "\nowned '" + cmdline.as_posix() + "'") == expected
 print('PASS: exact argv ownership rejects shell wrappers, unrelated scripts and status commands')
 
-# Hashes from the locally inspected historical v14.1 functions. No archive files needed.
-# Promotion baseline normalizes only the two notification wording changes.
+# Original dataplane hashes: normalize names and the explicit detector cache update,
+# never routing/firewall/guard/commit/rollback instructions. Policy has new tests.
+import re
 for name, expected in json.loads((ROOT / 'tooling/fastpath-baseline.json').read_text()).items():
     body = function(name)
-    if name == 'promote_hot_standby_on_failure':
-        gate = '    wan_recovery_allowed || return 1\n    [ -f "$WAN_PENDING_FILE" ] && return 1\n\n'
-        assert body.count(gate) == 1
-        body = body.replace(gate, '', 1)
+    cache = '    PROMOTION_EPOCH=$((PROMOTION_EPOCH + 1))\n    DETECT_CURRENT="$iface"; DETECT_UP=""; DETECT_DOWN=""; FAST_FAILURES=0; DETECT_FAILED=0\n'
+    if name == 'promote_iface':
+        assert body.count(cache) == 1
+        body = body.replace(cache, '', 1)
+        critical = '    local PROMOTION_CRITICAL=1 # No cooperative yields inside the verified transaction.\n'
+        assert body.count(critical) == 1
+        body = body.replace(critical, '', 1)
+    body = body.replace('hotswapper', 'vpn-watch').replace('CURRENT', 'ACTIVE')
+    body = body.replace('current_iface', 'active_iface').replace('current_peer', 'active_peer')
+    if name != 'next_lower_rank': body = re.sub(r'\bcurrent\b', 'active', body)
+    body = body.replace('downtier', 'standby').replace('DOWNTIER', 'STANDBY')
     assert hashlib.sha256(body.encode()).hexdigest() == expected, name + ' changed unexpectedly'
-print('PASS: shell syntax, exact peer mapping, Tier 2 stickiness, Tier 3 recovery order, guard fail-closed checks, zero/multiple/malformed reboot guards, historical fastpath hashes')
+print('PASS: shell syntax, rank mapping, guard/housekeeping cases, original dataplane hashes (names/cache normalized)')
 
 # Same production-function isolation for WAN diagnosis; no router/network calls.
 import runpy
 runpy.run_path(str(ROOT / 'tooling/test_wan_recovery.py'), run_name='__main__')
+runpy.run_path(str(ROOT / 'tooling/test_directional_runtime.py'), run_name='__main__')

@@ -7,7 +7,7 @@ namespace BrumeHotswapper.Tests;
 public class SharedProductionTests
 {
     [Theory]
-    [InlineData("-rwxr-xr-x    1 0 0 55880 ... /root/vpn-watch.sh", "755", '-', 0, 0)]
+    [InlineData("-rwxr-xr-x    1 0 0 55880 ... /root/hotswapper-main.sh", "755", '-', 0, 0)]
     [InlineData("-rwx------ 1 0 0 10 Sep 12 2026 /root/name with spaces", "700", '-', 0, 0)]
     [InlineData("-rw------- 1 123 456 10 Sep 12 2026 /root/name", "600", '-', 123, 456)]
     [InlineData("-rwxrwxrwx 1 0 0 10 ...", "777", '-', 0, 0)]
@@ -36,10 +36,10 @@ public class SharedProductionTests
     {
         var parsed=FileMetadata.ParseListing($"{symbolic} 1 {uid} {gid} 55880 ... file with spaces");
         var fields=new Dictionary<string,string>{{"exists","1"},{"regular","1"},{"symlink",symbolic[0]=='l'?"1":"0"},{"readable","1"},{"type",parsed.Type.ToString()},{"mode",parsed.Mode},{"uid",parsed.Uid.ToString()},{"gid",parsed.Gid.ToString()},{"size","55880"},{"sha256",new string('a',64)}};
-        var report=MetadataReview.Evaluate("/root/vpn-watch.sh",fields);
+        var report=MetadataReview.Evaluate("/root/hotswapper-main.sh",fields);
         Assert.Contains(report,f=>f.Status==expected);
-        if(expected=="BLOCK") Assert.Throws<SafeFailure>(()=>FileMetadata.Validate("/root/vpn-watch.sh",fields));
-        else {FileMetadata.Validate("/root/vpn-watch.sh",fields);Assert.DoesNotContain(report,f=>f.Status=="BLOCK");}
+        if(expected=="BLOCK") Assert.Throws<SafeFailure>(()=>FileMetadata.Validate("/root/hotswapper-main.sh",fields));
+        else {FileMetadata.Validate("/root/hotswapper-main.sh",fields);Assert.DoesNotContain(report,f=>f.Status=="BLOCK");}
     }
     [Fact] public void ReplacementGuardsQuoteSpacesAndCheckRootMetadata()
     {

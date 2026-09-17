@@ -1,3 +1,5 @@
+> Historical record from before the directional-role/layout refactor. For the current implementation, paths, guard hash and validation results, see [Hotswapper runtime](hotswapper-runtime.md).
+
 # Repair-capable installation
 
 The actual router state is authoritative. No journal, owner file, completion marker, persistent installer lock or transaction recovery gate is created or required.

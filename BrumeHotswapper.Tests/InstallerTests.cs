@@ -59,7 +59,7 @@ public class InstallerTests
         Assert.Equal(cron, CronPlanner.Generate(cron, true)); Assert.StartsWith(original, cron);
         var disabled = CronPlanner.Generate(cron, false); Assert.DoesNotContain(CronPlanner.Maintenance, disabled); Assert.Contains(CronPlanner.Supervisor, disabled);
     }
-    [Fact] public void CustomCronRequiresReview() => Assert.Throws<SafeFailure>(() => CronPlanner.Generate("1 * * * * /root/vpn-watch-supervisor.sh && echo custom", false));
+    [Fact] public void CustomCronRequiresReview() => Assert.Throws<SafeFailure>(() => CronPlanner.Generate("1 * * * * /root/hotswapper-supervisor.sh && echo custom", false));
     [Fact] public void DhcpReusesReservation()
     {
         var client = new LanClient("PC", "192.0.2.20", "02:00:00:00:00:20");
@@ -73,7 +73,7 @@ public class InstallerTests
         Assert.Throws<SafeFailure>(() => DhcpPlanner.Plan([client], [], [client], client.Ip));
     }
     [Fact] public void PlanAlwaysIncludesConditionalRebootAndValidatesBeforeMutation()
-    { var plan = InstallationPlanner.Create(Config()); Assert.False(plan[0].ChangesRouter); Assert.Contains(plan, s => s.Name.Contains("conditional reboot")); Assert.DoesNotContain(plan, s => s.Name.Contains("reserve")); }
+    { var plan = InstallationPlanner.Create(Config()); Assert.False(plan[0].ChangesRouter); Assert.Contains(plan, s => s.Name.Contains("housekeeping")); Assert.DoesNotContain(plan, s => s.Name.Contains("reserve")); }
     [Fact] public void ReportsRedactKnownSecretsUrlsAndKeys()
     {
         var text = DiagnosticLog.Redact("hello secret-value\nhttps://ntfy.example/private-topic\nPrivateKey=abc\npassword=anything", "secret-value");

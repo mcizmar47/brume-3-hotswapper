@@ -1,3 +1,5 @@
+> Historical record from before the directional-role/layout refactor. For the current implementation, paths, guard hash and validation results, see [Hotswapper runtime](hotswapper-runtime.md).
+
 # Shared production integration correction
 
 > Policy update: routing/kill-switch discussion below records earlier work. The current [selected GL policy preservation boundary](rpdb-lan-boundary.md) supersedes universal RPDB checks and supports both kill-switch settings.

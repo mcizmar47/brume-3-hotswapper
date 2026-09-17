@@ -1,3 +1,5 @@
+> Historical record from before the directional-role/layout refactor. For the current implementation, paths, guard hash and validation results, see [Hotswapper runtime](hotswapper-runtime.md).
+
 # Firmware compatibility evidence
 
 The project records GL-MT5000 / GL firmware 4.9.0 as its tested target. The reconciliation pass checked archived stock bytes and reproduced the guard output locally; it did not run a live firmware test.

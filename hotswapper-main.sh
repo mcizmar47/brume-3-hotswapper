@@ -1,9 +1,9 @@
 #!/bin/sh
 
 # GL.iNet / NordVPN three-slot watchdog v14.1 guarded fastpath
-# - one ACTIVE tunnel
-# - one hot STANDBY on the next lower tier
-# - one RECOVERY slot for probing better tiers
+# - one CURRENT tunnel
+# - one hot DOWNTIER on the next lower tier
+# - a directional UPTIER candidate, never a permanently assigned worker slot
 #
 # User-facing major tiers:
 #   1 Preferred locations from generated configuration
@@ -12,27 +12,27 @@
 #
 # Recovery policy:
 #   - Tier 1: sticky; no recovery work
-#   - Tier 2: sticky; no recovery to Tier 1 and no same-tier "upgrades"
+#   - Tier 2: prepare best higher rank; promote upward only on CURRENT failure
 #   - Tier 3: may recover only to Tier 1 or Tier 2
 #   - Offline: recover best-to-worst across all configured ranks
 #
-# The hot standby is always the next configured LOWER internal rank.
+# The hot downtier is always the next configured LOWER internal rank.
 # Notifications report MAJOR tier changes and recovery from a WAN outage.
 # v14.1: v14 guarded fastpath with detailed promotion timing disabled by default.
-# Set DEBUG_TIMING=1 in /root/vpn-watch.conf to restore promotion-timing.log writes.
+# Set DEBUG_TIMING=1 in /root/hotswapper/hotswapper.conf to restore promotion-timing.log writes.
 
 TUNNEL_ID=""
 GROUP_ID=""
-LOCATION_FILE="/root/vpn-watch-locations.tsv"
+LOCATION_FILE="/root/hotswapper/hotswapper-locations.tsv"
 SLOTS="wgclient1 wgclient2 wgclient3"
 
-PERSIST_DIR="/root/.vpn-watch"
-RUNTIME_DIR="/tmp/vpn-watch"
+PERSIST_DIR="/root/hotswapper/state"
+RUNTIME_DIR="/tmp/hotswapper"
 STATE_FILE="$RUNTIME_DIR/state"
-LOG_FILE="$PERSIST_DIR/vpn-watch.log"
+LOG_FILE="/root/hotswapper/log/hotswapper.log"
 LOCK_DIR="$RUNTIME_DIR/lock"
 BACKOFF_FILE="$RUNTIME_DIR/nord-backoff-until"
-LAST_RECOVERY_FILE="$RUNTIME_DIR/last-recovery"
+LAST_UPTIER_FILE="$RUNTIME_DIR/last-recovery"
 WAN_STATE_FILE="$RUNTIME_DIR/wan-state"
 WAN_PENDING_FILE="$RUNTIME_DIR/wan-notification-pending"
 WAN_CYCLE_RESULT=""
@@ -46,18 +46,18 @@ TEST_FAILOVER_TIMEOUT=90
 # Supported variables:
 #   NTFY_URL='https://ntfy.sh/<your-topic>'
 #   LOOP_SECONDS=20
-#   RECOVERY_INTERVAL=60
+#   UPTIER_INTERVAL=60
 #   CONNECT_TIMEOUT=18
 #   HANDSHAKE_MAX_AGE=75
-#   STANDBY_ATTEMPTS=3
+#   DOWNTIER_ATTEMPTS=3
 #   DEBUG_TIMING=1       # optional detailed promotion timing log (default 0)
-CONFIG_FILE="/root/vpn-watch.conf"
+CONFIG_FILE="/root/hotswapper/hotswapper.conf"
 
 LOOP_SECONDS=20
-RECOVERY_INTERVAL=60
+UPTIER_INTERVAL=60
 CONNECT_TIMEOUT=18
 HANDSHAKE_MAX_AGE=75
-STANDBY_ATTEMPTS=3
+DOWNTIER_ATTEMPTS=3
 KEEPALIVE_PROBE_INTERVAL=20
 KEEPALIVE_PROBE_TARGETS="1.1.1.1 8.8.8.8 208.67.222.222 208.67.220.220"
 KEEPALIVE_PROBE_TIMEOUT=2
@@ -66,6 +66,20 @@ LOG_MAX_BYTES=524288
 NORD_BACKOFF_SECONDS=900
 NTFY_URL=""
 DEBUG_TIMING=0
+# BusyBox fractional sleep; each completed pass is followed by this delay.
+DETECTOR_DELAY=0.150
+FAST_PROBE_WINDOW=0.200
+FAST_FAILURE_THRESHOLD=2
+DETECTOR_ENABLED=0
+IN_DETECTOR=0
+DETECT_CURRENT=""
+DETECT_UP=""
+DETECT_DOWN=""
+FAST_FAILURES=0
+SLOW_REQUESTED=0
+DETECT_FAILED=0
+SLOW_PID=""
+PROMOTION_EPOCH=0
 
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 
@@ -82,7 +96,9 @@ awk -F '\t' '
     END { if (bad || !NR || !preferred) exit 1 }
 ' "$LOCATION_FILE" || { echo "Invalid location configuration" >&2; exit 1; }
 
-mkdir -p "$PERSIST_DIR" "$RUNTIME_DIR"
+umask 077
+mkdir -p "$PERSIST_DIR" "$RUNTIME_DIR" "${LOG_FILE%/*}"
+chmod 700 "$RUNTIME_DIR"
 
 now() { date +%s; }
 
@@ -98,7 +114,7 @@ log() {
     local msg="$*"
     rotate_log_if_needed
     printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$msg" >> "$LOG_FILE"
-    logger -t vpn-watch "$msg" 2>/dev/null || true
+    logger -t hotswapper "$msg" 2>/dev/null || true
 }
 
 # Monotonic millisecond clock for v12 promotion diagnostics. /proc/uptime is
@@ -117,7 +133,7 @@ promo_trace() {
     # use the normal bounded watchdog log. Set DEBUG_TIMING=1 in config when
     # diagnosing promotion latency.
     [ "${DEBUG_TIMING:-0}" = "1" ] || return 0
-    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$PERSIST_DIR/promotion-timing.log"
+    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "${LOG_FILE%/*}/promotion-timing.log"
 }
 
 notify() {
@@ -125,6 +141,11 @@ notify() {
     [ "$(cat "$WAN_STATE_FILE" 2>/dev/null)" = WAN_OFFLINE ] && return 2
     shift
     local body="$*"
+    if [ "$IN_DETECTOR" = 1 ] || [ "${PROMOTION_CRITICAL:-0}" = 1 ]; then
+        printf '%s\n' "$title" > "$RUNTIME_DIR/notification-title"
+        printf '%s\n' "$body" > "$RUNTIME_DIR/notification-body"
+        return 0
+    fi
     if [ -z "$NTFY_URL" ]; then
         log "ntfy skipped: NTFY_URL is not configured"
         return 2
@@ -135,8 +156,9 @@ notify() {
         log "ntfy URL contains invalid controls"
         return 1
     fi
-    printf 'url = "%s"\n' "$(printf '%s' "$NTFY_URL" | sed 's/\\/\\\\/g; s/"/\\"/g')" | \
-        curl -fsS -m 8 -H "Title: $title" -d "$body" --config - >/dev/null 2>&1
+    slow_command curl -fsS -m 8 -H "Title: $title" -d "$body" --config - <<EOF
+url = "$(printf '%s' "$NTFY_URL" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+EOF
     rc=$?
     if [ "$rc" -ne 0 ]; then
         log "ntfy delivery failed rc=$rc title=$title"
@@ -146,6 +168,7 @@ notify() {
 }
 
 release_lock() {
+    stop_slow_command
     local pid=""
     [ -f "$LOCK_DIR/pid" ] && pid="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
     [ "$pid" = "$$" ] && rm -rf "$LOCK_DIR" 2>/dev/null
@@ -172,6 +195,112 @@ acquire_lock() {
     trap 'release_lock' EXIT
     trap 'release_lock; exit 0' INT TERM
     return 0
+}
+
+stop_slow_command() {
+    [ -n "$SLOW_PID" ] || return 0
+    kill -TERM -- "-$SLOW_PID" 2>/dev/null || true
+    wait "$SLOW_PID" 2>/dev/null || true
+    SLOW_PID=""
+}
+
+slow_command() {
+    local command_rc
+    if [ "$IN_DETECTOR" = 1 ] || [ "${PROMOTION_CRITICAL:-0}" = 1 ]; then "$@" >/dev/null 2>&1; return $?; fi
+    if [ "$DETECTOR_ENABLED" != 1 ]; then
+        "$@" > "$RUNTIME_DIR/command-output" 2>&1
+        return $?
+    fi
+    # One supervised command group, never another detector or detached worker.
+    # The shell owns all promotions; a provider command only prepares an unused slot.
+    setsid "$@" <&0 > "$RUNTIME_DIR/command-output" 2>&1 &
+    SLOW_PID=$!
+    while kill -0 "$SLOW_PID" 2>/dev/null; do
+        detector_iteration
+    done
+    wait "$SLOW_PID"; command_rc=$?
+    SLOW_PID=""
+    return "$command_rc"
+}
+
+cooperative_pause() {
+    local finish
+    if [ "$DETECTOR_ENABLED" != 1 ] || [ "$IN_DETECTOR" = 1 ]; then sleep "$1"; return; fi
+    finish=$(( $(monotonic_ms) + $1 * 1000 ))
+    while [ "$(monotonic_ms)" -lt "$finish" ]; do detector_iteration; done
+}
+
+fast_path_round() {
+    local iface="$1" first second r1 r2
+    # Concurrent *packets*, not concurrent detector passes. Both children are
+    # always reaped before returning. No GNU timeout/fractional ping assumption.
+    ping -n -I "$iface" -c 1 -W 1 -w 1 1.1.1.1 >/dev/null 2>&1 & first=$!
+    ping -n -I "$iface" -c 1 -W 1 -w 1 8.8.8.8 >/dev/null 2>&1 & second=$!
+    sleep "$FAST_PROBE_WINDOW"
+    kill "$first" "$second" 2>/dev/null || true
+    wait "$first"; r1=$?
+    wait "$second"; r2=$?
+    [ "$r1" -eq 0 ] || [ "$r2" -eq 0 ]
+}
+
+iface_hard_up() {
+    [ -n "$1" ] && [ "$(gl_iface_state "$1")" = connected ] || return 1
+    ip link show "$1" 2>/dev/null | grep -Eq '<([^>]*,)?UP(,|>)'
+}
+
+refresh_detector_roles() {
+    local roles cp cr ct target
+    roles="$(reconcile_roles)"
+    IFS='|' read -r DETECT_CURRENT cp cr ct DETECT_DOWN DETECT_UP target <<EOF
+$roles
+EOF
+    FAST_FAILURES=0
+    write_state_snapshot "$DETECT_CURRENT" "$DETECT_DOWN" "$DETECT_UP"
+}
+
+fast_health_pass() {
+    local selected candidate peer failed=0
+    [ "$IN_DETECTOR" = 0 ] || return 0
+    selected="$(current_iface)"
+    if [ "$selected" != "$DETECT_CURRENT" ]; then
+        # GL can change policy independently. Never use stale cached role identity.
+        DETECT_CURRENT="$selected"; DETECT_UP=""; DETECT_DOWN=""; DETECT_FAILED=0
+        FAST_FAILURES=0; SLOW_REQUESTED=1
+        return 0
+    fi
+    [ "$SLOW_REQUESTED" = 0 ] && [ "$DETECT_FAILED" = 0 ] || return 0
+    if ! iface_hard_up "$DETECT_CURRENT"; then
+        failed=1
+    elif fast_path_round "$DETECT_CURRENT"; then
+        FAST_FAILURES=0
+    else
+        FAST_FAILURES=$((FAST_FAILURES + 1))
+        [ "$FAST_FAILURES" -lt "$FAST_FAILURE_THRESHOLD" ] || failed=1
+    fi
+    [ "$failed" = 1 ] || return 0
+    IN_DETECTOR=1
+    DETECT_FAILED=1
+    rm -f "$RUNTIME_DIR/ready.$DETECT_CURRENT"
+    # Cached roles only: no rank searches, WAN diagnosis or provider work here.
+    for candidate in "$DETECT_UP" "$DETECT_DOWN"; do
+        [ -n "$candidate" ] && [ "$candidate" != "$DETECT_CURRENT" ] || continue
+        iface_hard_up "$candidate" && fast_path_round "$candidate" || continue
+        peer="$(iface_peer "$candidate")"
+        if promote_iface "$candidate" "$peer" current-failure-hot-candidate; then
+            DETECT_CURRENT="$candidate"; DETECT_UP=""; DETECT_DOWN=""
+            FAST_FAILURES=0; DETECT_FAILED=0
+            rm -f "$LAST_UPTIER_FILE" "$WAN_STATE_FILE"
+            break
+        fi
+    done
+    IN_DETECTOR=0
+    SLOW_REQUESTED=1
+}
+
+detector_iteration() {
+    fast_health_pass
+    # Delay starts AFTER the complete pass, including any promotion.
+    sleep "$DETECTOR_DELAY"
 }
 
 policy_section() {
@@ -225,18 +354,18 @@ tier1_ranks() {
     awk -F '\t' '$2 == 1 {print $1}' "$LOCATION_FILE" | sort -nu
 }
 
-active_iface() {
+current_iface() {
     policy_get via 2>/dev/null
 }
 
-active_peer() {
+current_peer() {
     local p
     p="$(policy_get peer_id 2>/dev/null)"
     if [ -n "$p" ]; then
         echo "$p"
         return 0
     fi
-    p="$(iface_peer "$(active_iface)" 2>/dev/null)" || return 1
+    p="$(iface_peer "$(current_iface)" 2>/dev/null)" || return 1
     echo "$p"
 }
 
@@ -290,7 +419,7 @@ probe_iface_path() {
     ip link show "$iface" >/dev/null 2>&1 || return 1
 
     for target in $KEEPALIVE_PROBE_TARGETS; do
-        if ping -I "$iface" -c 1 -W "$KEEPALIVE_PROBE_TIMEOUT" "$target" >/dev/null 2>&1; then
+        if slow_command ping -I "$iface" -c 1 -W "$KEEPALIVE_PROBE_TIMEOUT" "$target"; then
             mark_probe "$iface"
             return 0
         fi
@@ -386,7 +515,7 @@ set_nord_backoff() {
     until=$(( $(now) + NORD_BACKOFF_SECONDS ))
     echo "$until" > "$BACKOFF_FILE"
     log "Nord auxiliary-connection backoff for 15 minutes: $reason"
-    notify "VPN auxiliary backoff" "NordVPN rejected an auxiliary connection ($reason). New probing/precooking is paused for 15 minutes; the active tunnel and any already-connected standby are left untouched."
+    notify "VPN auxiliary backoff" "NordVPN rejected an auxiliary connection ($reason). New probing/precooking is paused for 15 minutes; the current tunnel and any already-connected hot candidate are left untouched."
 }
 
 maybe_clear_expired_backoff() {
@@ -407,41 +536,46 @@ is_rate_error_text() {
 }
 
 teardown_iface() {
-    local iface="$1" active
+    local iface="$1" current
     [ -n "$iface" ] || return 0
-    active="$(active_iface)"
-    if [ "$iface" = "$active" ]; then
-        log "REFUSING to tear down active interface $iface"
+    current="$(current_iface)"
+    if [ "$iface" = "$current" ]; then
+        log "REFUSING to tear down current interface $iface"
         return 1
     fi
 
-    ifdown "$iface" >/dev/null 2>&1 || true
-    /usr/bin/setup_instance stop "$iface" >/dev/null 2>&1 || true
-    /usr/bin/setup_instance clean "$iface" >/dev/null 2>&1 || true
-    rm -f "/tmp/wireguard/${iface}_state" "$(probe_stamp_file "$iface")" "$(health_fail_file "$iface")" 2>/dev/null
+    [ "$DETECT_UP" != "$iface" ] || DETECT_UP=""
+    [ "$DETECT_DOWN" != "$iface" ] || DETECT_DOWN=""
+    slow_command ifdown "$iface" || true
+    slow_command /usr/bin/setup_instance stop "$iface" || true
+    slow_command /usr/bin/setup_instance clean "$iface" || true
+    rm -f "$RUNTIME_DIR/ready.$iface" "/tmp/wireguard/${iface}_state" "$(probe_stamp_file "$iface")" "$(health_fail_file "$iface")" 2>/dev/null
     return 0
 }
 
 # Returns:
 #   0 = connected successfully
 #   1 = ordinary candidate failure
-#   2 = active tunnel failed while a recovery probe was in progress
+#   2 = current tunnel failed while a recovery probe was in progress
 #   3 = global Nord auxiliary backoff is active / was just entered
 prepare_iface() {
     local iface="$1" peer="$2" purpose="$3"
-    local out rc i active state
+    local out rc i current state epoch="$PROMOTION_EPOCH"
 
     in_backoff && return 3
 
-    active="$(active_iface)"
-    [ "$iface" != "$active" ] || return 1
+    current="$(current_iface)"
+    [ "$iface" != "$current" ] || return 1
 
+    printf '%s|%s|%s|%s\n' "$current" "$purpose" "$iface" "$peer" > "$RUNTIME_DIR/preparing"
     teardown_iface "$iface" || return 1
 
     log "Preparing $purpose candidate on $iface: peer=$peer server=$(peer_name "$peer") location=$(peer_location "$peer")"
 
-    out="$(/usr/bin/setup_instance generate "$iface" "$GROUP_ID" "$peer" 2>&1)"
+    slow_command /usr/bin/setup_instance generate "$iface" "$GROUP_ID" "$peer"
     rc=$?
+    out="$(cat "$RUNTIME_DIR/command-output")"
+    [ "$epoch" = "$PROMOTION_EPOCH" ] && [ "$current" = "$(current_iface)" ] || return 2
 
     if is_limit_error_text "$out"; then
         teardown_iface "$iface" >/dev/null 2>&1 || true
@@ -459,8 +593,10 @@ prepare_iface() {
         return 1
     fi
 
-    out="$(/usr/bin/setup_instance start "$iface" 2>&1)"
+    slow_command /usr/bin/setup_instance start "$iface"
     rc=$?
+    out="$(cat "$RUNTIME_DIR/command-output")"
+    [ "$epoch" = "$PROMOTION_EPOCH" ] && [ "$current" = "$(current_iface)" ] || return 2
     if is_limit_error_text "$out"; then
         teardown_iface "$iface" >/dev/null 2>&1 || true
         set_nord_backoff "device limit reached"
@@ -477,31 +613,30 @@ prepare_iface() {
         return 1
     fi
 
-    ifup "$iface" >/dev/null 2>&1 || true
+    slow_command ifup "$iface" || true
+    [ "$epoch" = "$PROMOTION_EPOCH" ] && [ "$current" = "$(current_iface)" ] || return 2
 
     i=0
     while [ "$i" -lt "$CONNECT_TIMEOUT" ]; do
         if iface_established_fresh "$iface"; then
             # Prove that this specific tunnel also carries traffic before accepting it.
             if probe_iface_path "$iface"; then
+                [ "$epoch" = "$PROMOTION_EPOCH" ] && [ "$current" = "$(current_iface)" ] || return 2
+                printf '%s\n' "$peer" > "$RUNTIME_DIR/ready.$iface"
                 log "Connected $purpose candidate: $(iface_summary "$iface")"
                 return 0
             fi
         fi
 
-        # Failure of ACTIVE always outranks recovery work.
-        if [ "$purpose" = "recovery" ]; then
-            active="$(active_iface)"
-            if ! iface_healthy "$active"; then
-                log "Active tunnel failed during recovery probe; aborting probe immediately"
-                teardown_iface "$iface" >/dev/null 2>&1 || true
-                return 2
-            fi
+        if [ "$purpose" = uptier ] || [ "$purpose" = downtier ]; then
+            [ "$DETECT_FAILED" = 0 ] || return 2
         fi
+        [ "$epoch" = "$PROMOTION_EPOCH" ] && [ "$current" = "$(current_iface)" ] || return 2
 
         state="$(cat "/tmp/wireguard/${iface}_state" 2>/dev/null)"
         [ "$state" = "failed" ] && break
-        sleep 1
+        cooperative_pause 1
+        [ "$epoch" = "$PROMOTION_EPOCH" ] && [ "$current" = "$(current_iface)" ] || return 2
         i=$((i + 1))
     done
 
@@ -540,23 +675,18 @@ next_lower_rank() {
 recovery_ranks() {
     local current_rank="$1" current_tier rank tier
     current_tier="$(rank_major_tier "$current_rank")"
-
-    # Tier 1 and Tier 2 are intentionally "sticky":
-    # no automatic upward recovery and no same-tier upgrades.
-    [ "$current_tier" -eq 3 ] 2>/dev/null || return 0
-
-    # Tier 3 may recover only into major Tier 1 or Tier 2.
-    # Never churn between New York/Boston/Ashburn/Israel just for marginal gains.
+    [ "$current_tier" -gt 1 ] 2>/dev/null || return 0
     for rank in $(rank_order); do
+        [ "$rank" -lt "$current_rank" ] || continue
         tier="$(rank_major_tier "$rank")"
-        [ "$tier" -eq 1 ] 2>/dev/null || [ "$tier" -eq 2 ] 2>/dev/null || continue
+        [ "$tier" -le 2 ] || continue
         rank_has_peers "$rank" && echo "$rank"
     done
 }
 
 # Rotates through servers INSIDE one internal location rank.
 # Moving between ranks is controlled separately by the state machine, so every
-# Austria server is considered part of the Austria group, etc.
+# server in one configured pool belongs to that same internal rank.
 next_peer_for_rank() {
     local rank="$1" exclude1="$2" exclude2="$3" exclude3="$4"
     local cursor_file="$PERSIST_DIR/cursor.rank${rank}" last="" first="" after=0 peer
@@ -592,29 +722,29 @@ find_healthy_iface_for_rank() {
     local rank="$1" exclude="$2" iface peer
     for iface in $SLOTS; do
         [ "$iface" = "$exclude" ] && continue
-        peer="$(iface_peer "$iface" 2>/dev/null)"
-        [ -n "$peer" ] || continue
+        peer="$(iface_peer "$iface")"
         [ "$(peer_rank "$peer")" = "$rank" ] || continue
-        iface_healthy "$iface" || continue
-        echo "$iface"
-        return 0
+        # Read-only reconciliation: never run the detector in command substitution.
+        [ "$(cat "$RUNTIME_DIR/ready.$iface" 2>/dev/null)" = "$peer" ] || continue
+        iface_hard_up "$iface" || continue
+        echo "$iface"; return 0
     done
     return 1
 }
 
 free_slot() {
-    local active="$1" keep="$2" iface
+    local current="$1" keep="$2" iface
 
     # Prefer a genuinely unused/down slot so we do not destroy a still-useful
     # old tunnel while another physical slot is available.
     for iface in $SLOTS; do
-        [ "$iface" = "$active" ] && continue
+        [ "$iface" = "$current" ] && continue
         [ "$iface" = "$keep" ] && continue
         if ! uci -q get network."$iface" >/dev/null 2>&1; then
             echo "$iface"
             return 0
         fi
-        if ! iface_healthy "$iface"; then
+        if ! iface_hard_up "$iface"; then
             echo "$iface"
             return 0
         fi
@@ -622,7 +752,7 @@ free_slot() {
 
     # If both auxiliaries are live, one still has to be selected for reuse.
     for iface in $SLOTS; do
-        [ "$iface" = "$active" ] && continue
+        [ "$iface" = "$current" ] && continue
         [ "$iface" = "$keep" ] && continue
         echo "$iface"
         return 0
@@ -643,7 +773,7 @@ fastpath_prepare_firewall() {
     local iface="$1"
 
     # rtp2 normally creates a firewall zone only for the selected VPN
-    # interface. A precooked standby therefore needs the minimum equivalent
+    # interface. A precooked downtier therefore needs the minimum equivalent
     # dataplane rules before we can point LAN traffic at it.
     iptables -w -t filter -C FORWARD -i br-lan -o "$iface" -j ACCEPT >/dev/null 2>&1 ||
         iptables -w -t filter -I FORWARD 1 -i br-lan -o "$iface" -j ACCEPT || return 1
@@ -660,11 +790,11 @@ fastpath_install_mark_override() {
     local mark="$1"
 
     # ROUTE_POLICY rule 1 restores an existing connmark. Insert immediately
-    # after it so even established LAN flows are forced onto the newly active
+    # after it so even established LAN flows are forced onto the newly current
     # precooked interface instead of retaining the old interface mark.
     # Delete our previous override first, if present.
     while iptables -w -t mangle -D ROUTE_POLICY \
-        -m comment --comment "vpn-watch-fastpath" \
+        -m comment --comment "hotswapper-fastpath" \
         -m addrtype ! --dst-type LOCAL \
         -m set ! --match-set "dst_net${TUNNEL_ID}" dst \
         -j MARK --set-xmark "$mark/0xf000" >/dev/null 2>&1; do :; done
@@ -672,11 +802,11 @@ fastpath_install_mark_override() {
     # Remove an override carrying a different old mark. There can be at most
     # one from us; identify it by comment and delete by line number.
     local n
-    n="$(iptables -w -t mangle -L ROUTE_POLICY --line-numbers -n 2>/dev/null | awk '/vpn-watch-fastpath/ {print $1; exit}')"
+    n="$(iptables -w -t mangle -L ROUTE_POLICY --line-numbers -n 2>/dev/null | awk '/hotswapper-fastpath/ {print $1; exit}')"
     [ -n "$n" ] && iptables -w -t mangle -D ROUTE_POLICY "$n" || true
 
     iptables -w -t mangle -I ROUTE_POLICY 2 \
-        -m comment --comment "vpn-watch-fastpath" \
+        -m comment --comment "hotswapper-fastpath" \
         -m addrtype ! --dst-type LOCAL \
         -m set ! --match-set "dst_net${TUNNEL_ID}" dst \
         -j MARK --set-xmark "$mark/0xf000"
@@ -715,7 +845,7 @@ release_gl_guard() {
     if [ -s "$gl_guard_pending" ]; then
         local n
         n="$(wc -l < "$gl_guard_pending" 2>/dev/null)"
-        log "GL_GUARD deferred_rtp2_calls=${n:-unknown}; final state will be verified by vpn-watch; details=$gl_guard_pending"
+        log "GL_GUARD deferred_rtp2_calls=${n:-unknown}; final state will be verified by hotswapper; details=$gl_guard_pending"
     fi
 }
 
@@ -730,9 +860,9 @@ fastpath_verify_consistency() {
     [ "$(uci -q get "route_policy.${sec}.mark")" = "$mark" ] || return 1
     fastpath_verify_kernel "$iface" "$mark" || return 1
 
-    count="$(iptables -w -t mangle -L ROUTE_POLICY --line-numbers -n 2>/dev/null | grep -c 'vpn-watch-fastpath')"
+    count="$(iptables -w -t mangle -L ROUTE_POLICY --line-numbers -n 2>/dev/null | grep -c 'hotswapper-fastpath')"
     [ "$count" = "1" ] || return 1
-    rule="$(iptables -w -t mangle -S ROUTE_POLICY 2>/dev/null | grep 'vpn-watch-fastpath')"
+    rule="$(iptables -w -t mangle -S ROUTE_POLICY 2>/dev/null | grep 'hotswapper-fastpath')"
     echo "$rule" | grep -Fq -- "--set-xmark $mark/0xf000" || return 1
     return 0
 }
@@ -760,6 +890,7 @@ fastpath_rollback() {
 }
 
 promote_iface() {
+    local PROMOTION_CRITICAL=1 # No cooperative yields inside the verified transaction.
     local iface="$1" peer="$2" reason="$3"
     local sec new_tier old_tier old_peer old_iface old_group old_mark loc name title body mark
     local t0 t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 guard_held=0 flipped=0
@@ -883,7 +1014,7 @@ promote_iface() {
         log "GL reconciliation collided with promotion; deferred call retained at $gl_guard_pending"
     fi
 
-    [ "$(active_iface)" = "$iface" ] || {
+    [ "$(current_iface)" = "$iface" ] || {
         log "Promotion post-unlock verification failed: policy no longer on $iface"
         return 1
     }
@@ -892,7 +1023,9 @@ promote_iface() {
     name="$(peer_name "$peer")"
     promo_trace "PROMO_END_V14_1 total_ms=$(($(monotonic_ms)-t0)) dataplane_flip_at_ms=$((t7-t0)) reason=$reason iface=$iface peer=$peer server=$name location=$loc"
 
-    log "PROMOTED_FAST_GUARDED reason=$reason old_major_tier=$old_tier new_major_tier=$new_tier active=$(iface_summary "$iface")"
+    PROMOTION_EPOCH=$((PROMOTION_EPOCH + 1))
+    DETECT_CURRENT="$iface"; DETECT_UP=""; DETECT_DOWN=""; FAST_FAILURES=0; DETECT_FAILED=0
+    log "PROMOTED_FAST_GUARDED reason=$reason old_major_tier=$old_tier new_major_tier=$new_tier current=$(iface_summary "$iface")"
 
     if [ "$new_tier" != "${old_tier:-0}" ]; then
         if [ "${old_tier:-0}" -eq 0 ] 2>/dev/null; then
@@ -918,92 +1051,78 @@ promote_iface() {
 }
 
 write_state_snapshot() {
-    local active="$1" standby="$2" recovery="$3" ap ar at sp sr st until
-    ap="$(iface_peer "$active" 2>/dev/null)"
-    ar="$(peer_rank "$ap")"
-    at="$(rank_major_tier "$ar")"
-    sp="$(iface_peer "$standby" 2>/dev/null)"
-    sr="$(peer_rank "$sp")"
-    st="$(rank_major_tier "$sr")"
-    until="$(backoff_until)"
-
-    cat > "$STATE_FILE" <<EOF
-active_iface=$active
-active_peer=$ap
-active_rank=$ar
-active_tier=$at
-standby_iface=$standby
-standby_peer=$sp
-standby_rank=$sr
-standby_tier=$st
-recovery_iface=$recovery
-nord_backoff_until=$until
-EOF
+    local current="$1" downtier="$2" uptier="$3" peer rank role iface
+    {
+        for role in current downtier uptier; do
+            case "$role" in current) iface="$current";; downtier) iface="$downtier";; uptier) iface="$uptier";; esac
+            peer="$(iface_peer "$iface" 2>/dev/null)"
+            rank="$(peer_rank "$peer")"
+            printf '%s_iface=%s\n%s_peer=%s\n%s_rank=%s\n%s_tier=%s\n' \
+                "$role" "$iface" "$role" "$peer" "$role" "$rank" "$role" "$(rank_major_tier "$rank")"
+        done
+        printf 'nord_backoff_until=%s\n' "$(backoff_until)"
+    } > "$STATE_FILE.new"
+    mv "$STATE_FILE.new" "$STATE_FILE"
 }
 
 reconcile_roles() {
-    local active ap ar at standby="" recovery="" target_rank=""
-    active="$(active_iface)"
-    ap="$(active_peer 2>/dev/null)"
-    ar="$(peer_rank "$ap")"
-    at="$(rank_major_tier "$ar")"
-
-    if [ "$ar" -gt 0 ] 2>/dev/null; then
-        target_rank="$(next_lower_rank "$ar" 2>/dev/null)"
-        if [ -n "$target_rank" ]; then
-            standby="$(find_healthy_iface_for_rank "$target_rank" "$active" 2>/dev/null)"
-        fi
+    local current cp cr ct downtier="" uptier="" target_rank="" rank
+    current="$(current_iface)"; cp="$(current_peer)"
+    cr="$(peer_rank "$cp")"; ct="$(rank_major_tier "$cr")"
+    if [ "$cr" -gt 0 ] 2>/dev/null; then
+        target_rank="$(next_lower_rank "$cr" 2>/dev/null)"
+        [ -z "$target_rank" ] || downtier="$(find_healthy_iface_for_rank "$target_rank" "$current")"
+        for rank in $(recovery_ranks "$cr"); do
+            uptier="$(find_healthy_iface_for_rank "$rank" "$current")"
+            [ -z "$uptier" ] || break
+        done
     fi
-
-    recovery="$(free_slot "$active" "$standby" 2>/dev/null)"
-    write_state_snapshot "$active" "$standby" "$recovery"
-
-    printf '%s|%s|%s|%s|%s|%s|%s\n' \
-        "$active" "$ap" "$ar" "$at" "$standby" "$recovery" "${target_rank:-0}"
+    printf '%s|%s|%s|%s|%s|%s|%s\n' "$current" "$cp" "$cr" "$ct" "$downtier" "$uptier" "${target_rank:-0}"
 }
 
-# Remove extra stale/live interfaces that are neither ACTIVE nor selected STANDBY.
-# We only do this when they are not currently being used as the recovery worker.
+# Release interfaces outside CURRENT and the retained directional candidate.
+# Call only after candidate preparation is complete.
 cleanup_extras() {
-    local active="$1" standby="$2" iface
+    local current="$1" downtier="$2" iface
     for iface in $SLOTS; do
-        [ "$iface" = "$active" ] && continue
-        [ "$iface" = "$standby" ] && continue
+        [ "$iface" = "$current" ] && continue
+        [ "$iface" = "$downtier" ] && continue
         uci -q get network."$iface" >/dev/null 2>&1 || continue
         teardown_iface "$iface" >/dev/null 2>&1 || true
     done
 }
 
-ensure_standby() {
-    local active="$1" ap="$2" ar="$3" at="$4" standby="$5" recovery="$6"
+ensure_downtier() {
+    local current="$1" ap="$2" ar="$3" at="$4" downtier="$5" spare="$6"
     local target_rank slot peer tries rc
 
     [ "$ar" -gt 0 ] 2>/dev/null || return 1
     target_rank="$(next_lower_rank "$ar" 2>/dev/null)"
 
-    # No lower configured internal rank (normally Tier 4 / Israel).
+    # No lower configured internal rank.
     [ -n "$target_rank" ] || return 0
 
-    if [ -n "$standby" ] && iface_healthy "$standby"; then
+    if [ -n "$downtier" ] && iface_healthy "$downtier"; then
         return 0
     fi
 
     in_backoff && return 0
 
-    slot="$recovery"
-    [ -n "$slot" ] || slot="$(free_slot "$active" "" 2>/dev/null)"
+    slot="$spare"
+    [ -n "$slot" ] || slot="$(free_slot "$current" "" 2>/dev/null)"
     [ -n "$slot" ] || return 1
 
     tries=0
-    while [ "$tries" -lt "$STANDBY_ATTEMPTS" ]; do
+    while [ "$tries" -lt "$DOWNTIER_ATTEMPTS" ]; do
         peer="$(next_peer_for_rank "$target_rank" "$ap" "" "")" || return 1
-        prepare_iface "$slot" "$peer" "standby"
+        prepare_iface "$slot" "$peer" "downtier"
         rc=$?
         case "$rc" in
             0)
-                log "Hot standby ready for $(rank_label "$target_rank"): $(iface_summary "$slot")"
+                log "Hot downtier ready for $(rank_label "$target_rank"): $(iface_summary "$slot")"
                 return 0
                 ;;
+            2) return 2 ;;
             3) return 0 ;;
         esac
         tries=$((tries + 1))
@@ -1012,27 +1131,26 @@ ensure_standby() {
     return 1
 }
 
-promote_hot_standby_on_failure() {
-    local active="$1" ap="$2" ar="$3" at="$4" standby="$5"
-    local target_rank peer slot tries rc
+promote_hot_candidate() {
+    local current="$1" cp="$2" cr="$3" ct="$4" down="$5" up="$6" candidate peer
+    for candidate in "$up" "$down"; do
+        [ -n "$candidate" ] && iface_healthy "$candidate" || continue
+        peer="$(iface_peer "$candidate")"
+        promote_iface "$candidate" "$peer" current-failure-hot-candidate && return 0
+    done
+    return 1
+}
 
+recover_emergency() {
+    local current="$1" ap="$2" ar="$3" at="$4" target_rank peer slot tries rc
     [ "$ar" -gt 0 ] 2>/dev/null || return 1
-
-    # Priority 1: promote the already-connected next-lower INTERNAL rank immediately.
-    # This can be a silent same-major-tier move such as Austria -> Spain.
-    if [ -n "$standby" ] && iface_healthy "$standby"; then
-        peer="$(iface_peer "$standby")"
-        log "ACTIVE failure detected on $active; immediately promoting hot standby $standby"
-        promote_iface "$standby" "$peer" "active-failure-hot-standby" && return 0
-    fi
-
     wan_recovery_allowed || return 1
     [ -f "$WAN_PENDING_FILE" ] && return 1
 
-    # No usable hot standby. Keep kill switch authoritative while attempting one
+    # No usable hot candidate. Keep kill switch authoritative while attempting one
     # emergency replacement.
     if in_backoff; then
-        log "ACTIVE failed with no usable hot standby; auxiliary creation is in Nord backoff, so kill switch remains in force"
+        log "CURRENT failed with no usable hot candidate; auxiliary creation is in Nord backoff, so kill switch remains in force"
         return 1
     fi
 
@@ -1042,27 +1160,28 @@ promote_hot_standby_on_failure() {
         target_rank="$ar"
     fi
 
-    slot="$(free_slot "$active" "" 2>/dev/null)"
+    slot="$(free_slot "$current" "" 2>/dev/null)"
     [ -n "$slot" ] || return 1
 
-    log "ACTIVE failure with no usable hot standby; emergency target=$(rank_label "$target_rank") slot=$slot"
+    log "CURRENT failure with no usable hot candidate; emergency target=$(rank_label "$target_rank") slot=$slot"
     tries=0
-    while [ "$tries" -lt "$STANDBY_ATTEMPTS" ]; do
+    while [ "$tries" -lt "$DOWNTIER_ATTEMPTS" ]; do
         peer="$(next_peer_for_rank "$target_rank" "$ap" "" "")" || return 1
         prepare_iface "$slot" "$peer" "emergency"
         rc=$?
         case "$rc" in
             0)
-                promote_iface "$slot" "$peer" "active-failure-emergency" && return 0
+                promote_iface "$slot" "$peer" "current-failure-emergency" && return 0
                 teardown_iface "$slot" >/dev/null 2>&1 || true
                 ;;
+            2) return 2 ;;
             3) return 1 ;;
         esac
         tries=$((tries + 1))
     done
 
     log "CRITICAL: unable to establish emergency VPN replacement; kill switch remains in force"
-    notify "VPN unavailable" "The active VPN and hot standby are unavailable, and no emergency VPN replacement connected. Kill switch remains in force; vpn-watch did not force direct WAN."
+    notify "VPN unavailable" "The current VPN and hot candidate are unavailable, and no emergency VPN replacement connected. Kill switch remains in force; hotswapper did not force direct WAN."
     return 1
 }
 
@@ -1110,7 +1229,7 @@ wan_probe_target() {
         [ "$actual" = "$dev" ] || exit 2
         case "$source" in ''|*[!0-9.]*) exit 2;; esac
         set -- OUTPUT -o "$dev" -s "$source/32" -d "$target/32" -p icmp --icmp-type echo-request \
-            -m owner --uid-owner 0 -m comment --comment vpn-watch-wan-probe -j ACCEPT
+            -m owner --uid-owner 0 -m comment --comment hotswapper-wan-probe -j ACCEPT
         # Remove an identical SIGKILL leftover, then insert ahead of LOCAL_POLICY.
         if iptables -w 2 -t mangle -C "$@" 2>/dev/null; then
             iptables -w 2 -t mangle -D "$@" 2>/dev/null || exit 2
@@ -1146,7 +1265,8 @@ wan_recovery_allowed() {
     local previous rc state rank
     [ -n "$WAN_CYCLE_RESULT" ] && return "$WAN_CYCLE_RESULT"
     previous="$(cat "$WAN_STATE_FILE" 2>/dev/null)"
-    wan_probe_round; rc=$?
+    if [ "$DETECTOR_ENABLED" = 1 ]; then slow_command "$0" _wan_probe; else wan_probe_round; fi
+    rc=$?
     case "$rc" in
         0)
             state=WAN_UP
@@ -1189,60 +1309,52 @@ wan_recovery_notification() {
 
 recovery_due() {
     local last=0
-    [ -f "$LAST_RECOVERY_FILE" ] && last="$(cat "$LAST_RECOVERY_FILE" 2>/dev/null)"
-    [ $(( $(now) - ${last:-0} )) -ge "$RECOVERY_INTERVAL" ]
+    [ -f "$LAST_UPTIER_FILE" ] && last="$(cat "$LAST_UPTIER_FILE" 2>/dev/null)"
+    [ $(( $(now) - ${last:-0} )) -ge "$UPTIER_INTERVAL" ]
 }
 
 mark_recovery_attempt() {
-    now > "$LAST_RECOVERY_FILE"
+    now > "$LAST_UPTIER_FILE"
 }
 
 probe_recovery_targets() {
-    local active="$1" ap="$2" ar="$3" at="$4" standby="$5" recovery="$6"
-    local rank peer rc standby_peer
-
-    # Deliberately do not recover from Tier 1 or Tier 2.
-    # Only Tier 3 actively searches for Tier 1 / Tier 2.
-    [ "$at" -eq 3 ] 2>/dev/null || return 0
-    [ -n "$recovery" ] || return 0
+    local current="$1" cp="$2" cr="$3" ct="$4" down="$5" up="$6"
+    local rank peer rc slot limit="$cr" keep="$down"
+    [ "$ct" -gt 1 ] 2>/dev/null || return 0
     recovery_due || return 0
     in_backoff && return 0
-
     mark_recovery_attempt
-    standby_peer="$(iface_peer "$standby" 2>/dev/null)"
-
-    # Best-to-worst recovery targets:
-    # Configured Tier 1 locations, then configured Tier 2 locations.
-    # Tier-3-to-Tier-3 "improvements" are intentionally ignored.
-    for rank in $(recovery_ranks "$ar"); do
-        peer="$(next_peer_for_rank "$rank" "$ap" "$standby_peer" "")"
+    if [ -n "$up" ]; then
+        limit="$(peer_rank "$(iface_peer "$up")")"
+        keep="$up"
+    fi
+    slot="$(free_slot "$current" "$keep")"
+    [ -n "$slot" ] || return 0
+    for rank in $(recovery_ranks "$cr"); do
+        [ "$rank" -lt "$limit" ] || continue
+        peer="$(next_peer_for_rank "$rank" "$cp" "$(iface_peer "$keep")" "")"
         [ -n "$peer" ] || continue
-
-        prepare_iface "$recovery" "$peer" "recovery"
-        rc=$?
+        prepare_iface "$slot" "$peer" uptier; rc=$?
+        rm -f "$RUNTIME_DIR/preparing"
         case "$rc" in
             0)
-                if promote_iface "$recovery" "$peer" "higher-major-tier-recovery"; then
-                    return 4
+                if [ "$ct" -eq 3 ]; then
+                    promote_iface "$slot" "$peer" higher-major-tier-recovery || return 0
                 fi
-                teardown_iface "$recovery" >/dev/null 2>&1 || true
-                ;;
-            2)
-                # ACTIVE failed while probing. Caller must immediately fail over.
-                return 2
-                ;;
-            3)
-                return 0
-                ;;
+                [ "$ct" -ne 2 ] || { DETECT_UP="$slot"; DETECT_DOWN=""; }
+                # Tier 2 retains CURRENT. The proven UPTIER replaces DOWNTIER.
+                cleanup_extras "$(current_iface)" "$slot"
+                return 4;;
+            2) return 2;;
+            3) return 0;;
         esac
     done
-
     return 0
 }
 
 
 recover_offline_best() {
-    local active slot rank peer tries rc old_active
+    local current slot rank peer tries rc old_active
 
     wan_recovery_allowed || return 1
     in_backoff && {
@@ -1250,7 +1362,7 @@ recover_offline_best() {
         return 1
     }
 
-    old_active="$(active_iface 2>/dev/null)"
+    old_active="$(current_iface 2>/dev/null)"
     slot="$(free_slot "$old_active" "" 2>/dev/null)"
 
     # If free_slot cannot resolve because policy state is malformed, choose any
@@ -1268,7 +1380,7 @@ recover_offline_best() {
     for rank in $(rank_order); do
         rank_has_peers "$rank" || continue
         tries=0
-        while [ "$tries" -lt "$STANDBY_ATTEMPTS" ]; do
+        while [ "$tries" -lt "$DOWNTIER_ATTEMPTS" ]; do
             peer="$(next_peer_for_rank "$rank" "" "" "")" || break
 
             prepare_iface "$slot" "$peer" "offline-recovery"
@@ -1282,6 +1394,7 @@ recover_offline_best() {
                     fi
                     teardown_iface "$slot" >/dev/null 2>&1 || true
                     ;;
+                2) return 2;;
                 3)
                     return 1
                     ;;
@@ -1295,122 +1408,96 @@ recover_offline_best() {
 }
 
 run_cycle() {
-    local roles active ap ar at standby recovery target_rank rc roles2
-
+    local roles current cp cr ct down up target epoch="$PROMOTION_EPOCH" rc
     WAN_CYCLE_RESULT=""
     maybe_clear_expired_backoff
-
-    # Confirmed outage: only WAN checks until it returns, then best-first VPN
-    # recovery. Keep this branch until promotion succeeds (including backoff).
     if [ -f "$WAN_PENDING_FILE" ]; then
         recover_offline_best || true
+        refresh_detector_roles
+        SLOW_REQUESTED=0
         return 0
     fi
-
     roles="$(reconcile_roles)"
-    IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
+    IFS='|' read -r current cp cr ct down up target <<EOF
 $roles
 EOF
-
-    if [ -z "$active" ] || [ -z "$ap" ] || [ "${ar:-0}" -eq 0 ]; then
-        log "Cannot reconcile active VPN state (active=$active peer=$ap rank=$ar tier=$at); entering offline recovery"
-        recover_offline_best || true
-        return 0
+    DETECT_CURRENT="$current"; DETECT_DOWN="$down"; DETECT_UP="$up"
+    rc=1
+    if [ "$DETECT_FAILED" = 0 ] && [ -n "$current" ] && [ "${cr:-0}" -gt 0 ]; then
+        iface_healthy "$current"; rc=$?
     fi
-
-    if ! iface_healthy "$active"; then
-        promote_hot_standby_on_failure "$active" "$ap" "$ar" "$at" "$standby"
-        rc=$?
-        if [ "$rc" -eq 0 ]; then
-            rm -f "$WAN_STATE_FILE"
-            # New ACTIVE first. Only after continuity is restored do we rebuild.
-            roles="$(reconcile_roles)"
-            IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
-$roles
-EOF
-            ensure_standby "$active" "$ap" "$ar" "$at" "$standby" "$recovery" || true
-        else
-            # No downward/same-rank replacement worked: treat this as offline and
-            # recover best-to-worst across Tier 1, Tier 2 and Tier 3.
-            recover_offline_best || true
+    [ "$epoch" = "$PROMOTION_EPOCH" ] && [ "$current" = "$(current_iface)" ] || { refresh_detector_roles; return 0; }
+    if [ "$DETECT_FAILED" = 1 ] || [ "$rc" -ne 0 ]; then
+        DETECT_FAILED=1
+        rm -f "$RUNTIME_DIR/ready.$current"
+        SLOW_REQUESTED=1
+        if ! promote_hot_candidate "$current" "$cp" "$cr" "$ct" "$down" "$up"; then
+            recover_emergency "$current" "$cp" "$cr" "$ct"; rc=$?
+            [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ] || recover_offline_best || true
         fi
-        return 0
-    fi
-
-    rm -f "$WAN_STATE_FILE"
-    # ACTIVE healthy: priority 2 is maintaining the immediate next-lower
-    # INTERNAL rank as an already-connected hot standby.
-    ensure_standby "$active" "$ap" "$ar" "$at" "$standby" "$recovery" || true
-
-    roles="$(reconcile_roles)"
-    IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
+    else
+        SLOW_REQUESTED=0
+        rm -f "$WAN_STATE_FILE"
+        if [ -n "$up" ] && ! iface_healthy "$up"; then
+            rm -f "$RUNTIME_DIR/ready.$up"; up=""; DETECT_UP=""
+        fi
+        [ "$epoch" = "$PROMOTION_EPOCH" ] || { refresh_detector_roles; return 0; }
+        if [ "$ct" -eq 3 ] && [ -n "$up" ]; then
+            promote_iface "$up" "$(iface_peer "$up")" higher-major-tier-recovery || true
+        else
+            if [ -n "$up" ]; then
+                cleanup_extras "$current" "$up"
+            else
+                ensure_downtier "$current" "$cp" "$cr" "$ct" "$down" "$(free_slot "$current" "$down")" || true
+                [ "$DETECT_FAILED" = 0 ] && [ "$epoch" = "$PROMOTION_EPOCH" ] && [ "$current" = "$(current_iface)" ] || { refresh_detector_roles; return 0; }
+                rm -f "$RUNTIME_DIR/preparing"
+                roles="$(reconcile_roles)"
+                IFS='|' read -r current cp cr ct down up target <<EOF
 $roles
 EOF
-
-    # Recovery policy is intentionally sticky:
-    # - Tier 1: no recovery work
-    # - Tier 2: no upward recovery and no same-tier "upgrades"
-    # - Tier 3: probe only Tier 1 and Tier 2, best-to-worst
-    probe_recovery_targets "$active" "$ap" "$ar" "$at" "$standby" "$recovery"
-    rc=$?
-
-    if [ "$rc" -eq 2 ]; then
-        # ACTIVE died during upward recovery. Hot-standby promotion outranks all else.
-        roles2="$(reconcile_roles)"
-        IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
-$roles2
-EOF
-        promote_hot_standby_on_failure "$active" "$ap" "$ar" "$at" "$standby" || true
-    elif [ "$rc" -eq 4 ]; then
-        # A better rank was promoted. Immediately rebuild the correct next-lower
-        # hot standby before housekeeping, rather than waiting for the next loop.
-        roles2="$(reconcile_roles)"
-        IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
-$roles2
-EOF
-        ensure_standby "$active" "$ap" "$ar" "$at" "$standby" "$recovery" || true
+                DETECT_DOWN="$down"; DETECT_UP="$up"
+            fi
+            probe_recovery_targets "$current" "$cp" "$cr" "$ct" "$down" "$up" || true
+        fi
     fi
-
-    roles="$(reconcile_roles)"
-    IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
-$roles
-EOF
-    cleanup_extras "$active" "$standby"
-    write_state_snapshot "$active" "$standby" "$recovery"
+    rm -f "$RUNTIME_DIR/preparing"
+    refresh_detector_roles
+    SLOW_REQUESTED=0
+    if [ "$DETECT_FAILED" = 1 ] && [ -z "$WAN_CYCLE_RESULT" ]; then SLOW_REQUESTED=1; fi
 }
 
 pre_reboot_recover_core() {
-    local roles active ap ar at standby recovery target_rank
-    local existing peer rc tries=0 preferred_rank
+    local roles current ap ar at downtier uptier target_rank
+    local existing peer rc tries=0 preferred_rank slot
 
     roles="$(reconcile_roles)"
-    IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
+    IFS='|' read -r current ap ar at downtier uptier target_rank <<EOF
 $roles
 EOF
 
-    if [ -z "$active" ] || [ -z "$ap" ] || [ "${ar:-0}" -eq 0 ]; then
-        log "PRE-REBOOT: cannot reconcile active VPN; no Tier 1 recovery attempted"
-        echo "PRE-REBOOT: active VPN could not be reconciled."
+    if [ -z "$current" ] || [ -z "$ap" ] || [ "${ar:-0}" -eq 0 ]; then
+        log "PRE-REBOOT: cannot reconcile current VPN; no Tier 1 recovery attempted"
+        echo "PRE-REBOOT: current VPN could not be reconciled."
         return 1
     fi
 
     if [ "$at" -ne 2 ] 2>/dev/null; then
-        log "PRE-REBOOT: active major tier is $at, not Tier 2; no special recovery needed"
-        echo "PRE-REBOOT: active VPN is Tier $at; Tier 2 -> Tier 1 recovery not needed."
+        log "PRE-REBOOT: current major tier is $at, not Tier 2; no special recovery needed"
+        echo "PRE-REBOOT: current VPN is Tier $at; Tier 2 -> Tier 1 recovery not needed."
         return 0
     fi
 
-    log "PRE-REBOOT: Tier 2 active ($(iface_summary "$active")); attempting one deliberate recovery to Tier 1"
+    log "PRE-REBOOT: Tier 2 current ($(iface_summary "$current")); attempting one deliberate recovery to Tier 1"
 
     for preferred_rank in $(tier1_ranks); do
     tries=0
     # Reuse an already-live configured Tier 1 tunnel if available.
-    existing="$(find_healthy_iface_for_rank "$preferred_rank" "$active" 2>/dev/null)"
+    existing="$(find_healthy_iface_for_rank "$preferred_rank" "$current" 2>/dev/null)"
     if [ -n "$existing" ]; then
         peer="$(iface_peer "$existing" 2>/dev/null)"
         if promote_iface "$existing" "$peer" "pre-reboot-tier1-recovery"; then
-            sleep 2
-            if [ "$(peer_tier "$(active_peer 2>/dev/null)")" -eq 1 ] 2>/dev/null && iface_healthy "$(active_iface)"; then
+            cooperative_pause 2
+            if [ "$(peer_tier "$(current_peer 2>/dev/null)")" -eq 1 ] 2>/dev/null && iface_healthy "$(current_iface)"; then
                 log "PRE-REBOOT: Tier 1 recovery verified using existing tunnel"
                 echo "PRE-REBOOT: recovered to Tier 1 and verified."
                 return 0
@@ -1425,34 +1512,34 @@ EOF
         return 1
     fi
 
-    [ -n "$recovery" ] || recovery="$(free_slot "$active" "$standby" 2>/dev/null)"
-    if [ -z "$recovery" ]; then
+    slot="$(free_slot "$current" "$downtier" 2>/dev/null)"
+    if [ -z "$slot" ]; then
         log "PRE-REBOOT: no auxiliary slot available for Tier 1 probe"
         echo "PRE-REBOOT: no slot available for Tier 1 recovery."
         return 1
     fi
 
-    while [ "$tries" -lt "$STANDBY_ATTEMPTS" ]; do
-        peer="$(next_peer_for_rank "$preferred_rank" "$ap" "$(iface_peer "$standby" 2>/dev/null)" "")" || break
+    while [ "$tries" -lt "$DOWNTIER_ATTEMPTS" ]; do
+        peer="$(next_peer_for_rank "$preferred_rank" "$ap" "$(iface_peer "$downtier" 2>/dev/null)" "")" || break
 
-        prepare_iface "$recovery" "$peer" "pre-reboot-recovery"
+        prepare_iface "$slot" "$peer" "pre-reboot-recovery"
         rc=$?
 
         case "$rc" in
             0)
-                if promote_iface "$recovery" "$peer" "pre-reboot-tier1-recovery"; then
-                    sleep 2
-                    if [ "$(peer_tier "$(active_peer 2>/dev/null)")" -eq 1 ] 2>/dev/null && iface_healthy "$(active_iface)"; then
-                        log "PRE-REBOOT: Tier 1 recovery verified: $(iface_summary "$(active_iface)")"
+                if promote_iface "$slot" "$peer" "pre-reboot-tier1-recovery"; then
+                    cooperative_pause 2
+                    if [ "$(peer_tier "$(current_peer 2>/dev/null)")" -eq 1 ] 2>/dev/null && iface_healthy "$(current_iface)"; then
+                        log "PRE-REBOOT: Tier 1 recovery verified: $(iface_summary "$(current_iface)")"
                         echo "PRE-REBOOT: recovered to Tier 1 and verified."
                         return 0
                     fi
                 fi
-                teardown_iface "$recovery" >/dev/null 2>&1 || true
+                teardown_iface "$slot" >/dev/null 2>&1 || true
                 ;;
             2)
-                log "PRE-REBOOT: active Tier 2 tunnel failed while Tier 1 was being probed"
-                echo "PRE-REBOOT: Tier 1 recovery aborted because the active tunnel failed."
+                log "PRE-REBOOT: current Tier 2 tunnel failed while Tier 1 was being probed"
+                echo "PRE-REBOOT: Tier 1 recovery aborted because the current tunnel failed."
                 return 1
                 ;;
             3)
@@ -1494,7 +1581,7 @@ handle_pre_reboot_request() {
 
 pre_reboot_recover_once() {
     acquire_lock || {
-        echo "vpn-watch is already running; use the daemon request mechanism."
+        echo "hotswapper is already running; use the daemon request mechanism."
         return 2
     }
 
@@ -1503,37 +1590,27 @@ pre_reboot_recover_once() {
 
 
 show_status() {
-    local roles active ap ar at standby recovery target_rank until remain target_desc
+    local roles current cp cr ct down up target preparing_current purpose slot peer
     roles="$(reconcile_roles)"
-    IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
+    IFS='|' read -r current cp cr ct down up target <<EOF
 $roles
 EOF
-
+    if [ -f "$RUNTIME_DIR/preparing" ]; then
+        IFS='|' read -r preparing_current purpose slot peer < "$RUNTIME_DIR/preparing"
+        [ "$preparing_current" = "$current" ] || purpose=""
+    fi
     case "$(cat "$WAN_STATE_FILE" 2>/dev/null)" in
-        WAN_OFFLINE) echo "WAN: WAN_OFFLINE (VPN recovery paused)";;
-        WAN_SUSPECT) echo "WAN: suspect (awaiting confirmation)";;
-        WAN_UNKNOWN) echo "WAN: unknown (probe context unavailable; VPN recovery paused)";;
+        WAN_OFFLINE|WAN_SUSPECT|WAN_UNKNOWN) echo "WAN: $(cat "$WAN_STATE_FILE") (VPN recovery paused)";;
     esac
-    echo "Tunnel: $TUNNEL_ID"
-    echo "ACTIVE:     $(iface_summary "$active")"
-    if [ -n "$standby" ]; then
-        echo "PRECOOKED:  $(iface_summary "$standby")"
-    elif [ "${target_rank:-0}" -gt 0 ] 2>/dev/null; then
-        target_desc="$(rank_label "$target_rank")"
-        echo "PRECOOKED:  not ready (next fallback: $target_desc)"
-    else
-        echo "PRECOOKED:  none (lowest configured fallback rank)"
-    fi
-    echo "RECOVERY:   ${recovery:-none}"
-
-    until="$(backoff_until)"
-    if [ "${until:-0}" -gt "$(now)" ] 2>/dev/null; then
-        remain=$((until - $(now)))
-        echo "NORD BACKOFF: active (${remain}s remaining)"
-    else
-        echo "NORD BACKOFF: inactive"
-    fi
-
+    echo "CURRENT:   $(iface_summary "$current")"
+    if [ -n "$up" ]; then echo "UPTIER:    $(iface_summary "$up") [hot]"
+    elif [ "$purpose" = uptier ]; then echo "UPTIER:    $slot preparing"
+    else echo "UPTIER:    none"; fi
+    if [ -n "$up" ]; then echo "DOWNTIER:  not retained while UPTIER is hot"
+    elif [ -n "$down" ]; then echo "DOWNTIER:  $(iface_summary "$down") [hot]"
+    elif [ "$purpose" = downtier ]; then echo "DOWNTIER:  $slot preparing"
+    else echo "DOWNTIER:  none"; fi
+    in_backoff && echo "NORD BACKOFF: active" || echo "NORD BACKOFF: inactive"
     echo "Kill switch: $(policy_get killswitch 2>/dev/null || echo '?')"
 }
 
@@ -1575,38 +1652,39 @@ classify_slots() {
 
 
 test_failover_core() {
-    local roles active ap ar at standby recovery target_rank rc
+    local roles current ap ar at downtier uptier target_rank rc candidate
 
     roles="$(reconcile_roles)"
-    IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
+    IFS='|' read -r current ap ar at downtier uptier target_rank <<EOF
 $roles
 EOF
 
-    if [ -z "$active" ] || [ -z "$ap" ] || [ "${ar:-0}" -eq 0 ]; then
-        echo "Cannot reconcile the current active VPN."
+    if [ -z "$current" ] || [ -z "$ap" ] || [ "${ar:-0}" -eq 0 ]; then
+        echo "Cannot reconcile the current current VPN."
         return 1
     fi
 
-    if [ -z "$standby" ]; then
-        echo "No healthy precooked standby is available; refusing synthetic failover test."
+    candidate="${uptier:-$downtier}"
+    if [ -z "$candidate" ]; then
+        echo "No healthy precooked downtier is available; refusing synthetic failover test."
         return 1
     fi
 
-    if ! iface_healthy "$standby"; then
-        echo "Precooked standby is not healthy; refusing synthetic failover test."
+    if ! iface_healthy "$candidate"; then
+        echo "Precooked downtier is not healthy; refusing synthetic failover test."
         return 1
     fi
 
-    echo "=== Synthetic ACTIVE failure test ==="
-    echo "Current ACTIVE:    $(iface_summary "$active")"
-    echo "Hot PRECOOKED:     $(iface_summary "$standby")"
+    echo "=== Synthetic CURRENT failure test ==="
+    echo "Current CURRENT:    $(iface_summary "$current")"
+    echo "Hot candidate:    $(iface_summary "$candidate")"
     echo
-    echo "Injecting ONE synthetic failure event for the current ACTIVE."
+    echo "Injecting ONE synthetic failure event for the current CURRENT."
     echo "No peer/tier blacklist is created; the synthetic failure ends immediately after promotion."
 
-    log "TEST: injecting one synthetic ACTIVE failure event active=$active peer=$ap rank=$ar"
+    log "TEST: injecting one synthetic CURRENT failure event current=$current peer=$ap rank=$ar"
 
-    promote_hot_standby_on_failure "$active" "$ap" "$ar" "$at" "$standby"
+    promote_hot_candidate "$current" "$ap" "$ar" "$at" "$downtier" "$uptier"
     rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "Synthetic failover promotion FAILED."
@@ -1621,8 +1699,8 @@ EOF
     # Synthetic failure is over. Run the ordinary post-failover management
     # cycle. Tier 2 remains sticky by policy, so this should rebuild the next
     # lower fallback without automatically returning to the preferred tier.
-    rm -f "$LAST_RECOVERY_FILE"
-    sleep 2
+    rm -f "$LAST_UPTIER_FILE"
+    cooperative_pause 2
 
     echo
     echo "=== Running normal post-failover cycle ==="
@@ -1664,7 +1742,7 @@ is_daemon_running() {
     kill -0 "$pid" 2>/dev/null || return 1
     [ -r "/proc/$pid/cmdline" ] || return 1
     cmdline="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
-    echo "$cmdline" | grep -Fq '/root/vpn-watch.sh daemon'
+    echo "$cmdline" | grep -Fq '/root/hotswapper-main.sh daemon'
 }
 
 test_failover_once() {
@@ -1674,7 +1752,7 @@ test_failover_once() {
         # Useful for maintenance: if no daemon owns the VPN, retain the old
         # direct test behavior under the normal single-instance lock.
         acquire_lock || {
-            echo "vpn-watch is already running, but its daemon could not be validated."
+            echo "hotswapper is already running, but its daemon could not be validated."
             return 1
         }
         test_failover_core
@@ -1685,7 +1763,7 @@ test_failover_once() {
     rm -f "$TEST_FAILOVER_RESULT_FILE"
     printf '%s\n' "$token" > "$TEST_FAILOVER_REQUEST_FILE"
 
-    echo "Synthetic failover request sent to the running vpn-watch daemon."
+    echo "Synthetic failover request sent to the running hotswapper daemon."
     echo "Waiting for daemon result (timeout ${TEST_FAILOVER_TIMEOUT}s)..."
 
     while [ "$waited" -lt "$TEST_FAILOVER_TIMEOUT" ]; do
@@ -1706,35 +1784,45 @@ test_failover_once() {
     done
 
     echo "Synthetic failover test TIMED OUT waiting for the daemon."
-    echo "Check: /root/vpn-watch.sh log 30"
+    echo "Check: /root/hotswapper-main.sh log 30"
     return 1
 }
 
 daemon_loop() {
-    acquire_lock || {
-        echo "vpn-watch is already running."
-        exit 1
-    }
-
-    log "vpn-watch daemon started pid=$$ loop=${LOOP_SECONDS}s"
-
+    acquire_lock || { echo "Hotswapper is already running."; exit 1; }
+    local next_slow=0 interval title body
+    # Fail clearly if this BusyBox build lacks fractional sleep/setsid.
+    command -v setsid >/dev/null && sleep "$DETECTOR_DELAY" || return 1
+    DETECTOR_ENABLED=1
+    refresh_detector_roles
+    log "Hotswapper started; serial 150 ms post-pass detector delay"
     while true; do
-        handle_pre_reboot_request
-        handle_test_failover_request
-        run_cycle || log "vpn-watch cycle returned non-zero"
-        case "$(cat "$WAN_STATE_FILE" 2>/dev/null)" in
-            WAN_OFFLINE|WAN_SUSPECT|WAN_UNKNOWN) sleep 10;;
-            *) sleep "$LOOP_SECONDS";;
-        esac
+        detector_iteration
+        if [ "$SLOW_REQUESTED" = 1 ] || [ "$(monotonic_ms)" -ge "$next_slow" ]; then
+            SLOW_REQUESTED=0
+            refresh_detector_roles
+            handle_pre_reboot_request
+            handle_test_failover_request
+            run_cycle || log "Hotswapper slow cycle returned non-zero"
+            if [ -f "$RUNTIME_DIR/notification-title" ]; then
+                title="$(cat "$RUNTIME_DIR/notification-title")"; body="$(cat "$RUNTIME_DIR/notification-body")"
+                rm -f "$RUNTIME_DIR/notification-title" "$RUNTIME_DIR/notification-body"
+                notify "$title" "$body" || true
+            fi
+            interval="$LOOP_SECONDS"
+            case "$(cat "$WAN_STATE_FILE" 2>/dev/null)" in WAN_OFFLINE|WAN_SUSPECT|WAN_UNKNOWN) interval=10;; esac
+            next_slow=$(( $(monotonic_ms) + interval * 1000 ))
+        fi
     done
 }
 
 case "${1:-status}" in
+    _wan_probe) wan_probe_round; exit $?;;
     status)
         show_status
         ;;
     once)
-        acquire_lock || { echo "vpn-watch is already running."; exit 1; }
+        acquire_lock || { echo "hotswapper is already running."; exit 1; }
         run_cycle
         show_status
         ;;
@@ -1742,11 +1830,11 @@ case "${1:-status}" in
         daemon_loop
         ;;
     notify_test)
-        if notify "VPN Watch Test" "vpn-watch notification test succeeded."; then
+        if notify "Hotswapper Test" "hotswapper notification test succeeded."; then
             echo "Notification sent successfully."
         else
             rc=$?
-            echo "Notification FAILED (rc=$rc). Check NTFY_URL/network and vpn-watch log."
+            echo "Notification FAILED (rc=$rc). Check NTFY_URL/network and hotswapper log."
             exit "$rc"
         fi
         ;;

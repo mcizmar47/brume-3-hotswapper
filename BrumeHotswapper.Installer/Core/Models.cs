@@ -11,7 +11,7 @@ public abstract class Observable : INotifyPropertyChanged
     protected bool Set<T>(ref T field, T value, [CallerMemberName] string? name = null)
     { if (EqualityComparer<T>.Default.Equals(field, value)) return false; field = value; Changed(name); return true; }
 }
-public enum Compatibility { StockKnownCompatible, AlreadyPatchedKnownCompatible, HistoricalGuardKnownCompatible, Unknown, KnownIncompatible }
+public enum Compatibility { StockKnownCompatible, AlreadyPatchedKnownCompatible, Unknown, KnownIncompatible }
 public record RouterIdentity(string Address, string Model, string Board, string Firmware, string Rtp2Hash)
 {
     public bool IsBrume => Board.Equals("glinet,gl-mt5000", StringComparison.OrdinalIgnoreCase)

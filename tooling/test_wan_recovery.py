@@ -9,11 +9,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SH = sys.argv[1] if len(sys.argv) > 1 else "sh"
 if pathlib.Path(SH).is_absolute():
     os.environ["PATH"] = str(pathlib.Path(SH).parent) + os.pathsep + os.environ.get("PATH", "")
-SOURCE = (ROOT / "vpn-watch.sh").read_text(encoding="utf-8")
+SOURCE = (ROOT / "hotswapper-main.sh").read_text(encoding="utf-8")
 
 
 def function(name):
-    start = SOURCE.index(name + "() {")
+    start = SOURCE.index("\n" + name + "() {") + 1
     return SOURCE[start:SOURCE.index("\n}", start) + 2]
 
 
@@ -25,7 +25,7 @@ def check(names, stubs, body):
         path = pathlib.Path(directory)
         # No set -e: production intentionally examines failing command statuses.
         code = f"cd '{path.as_posix()}' || exit 99\n"
-        code += "WAN_STATE_FILE=wan-state; WAN_PENDING_FILE=pending; PERSIST_DIR=.; WAN_CYCLE_RESULT=''\n"
+        code += "WAN_STATE_FILE=wan-state; WAN_PENDING_FILE=pending; PERSIST_DIR=.; WAN_CYCLE_RESULT=''; RUNTIME_DIR=.; DETECTOR_ENABLED=0; DETECT_FAILED=0; PROMOTION_EPOCH=0; IN_DETECTOR=0\n"
         code += "log() { echo \"$*\" >> events; }\n"
         code += "\n".join(function(n) for n in names) + "\n" + stubs + "\n" + body
         script = path / "test.sh"
@@ -36,14 +36,14 @@ def check(names, stubs, body):
 
 
 # Hot promotion must return before WAN discovery or any emergency candidate.
-check(["promote_hot_standby_on_failure"], r"""
+check(["promote_hot_candidate"], r"""
 iface_healthy() { return 0; }
 iface_peer() { echo 12; }
 promote_iface() { echo "$*" > promoted; return 0; }
 wan_recovery_allowed() { echo called > wan-called; return 1; }
 """, r"""
-promote_hot_standby_on_failure wgclient1 11 1 1 wgclient2 || exit 10
-[ ! -e wan-called ] && grep -q 'active-failure-hot-standby' promoted || exit 11
+promote_hot_candidate wgclient1 11 1 1 wgclient2 || exit 10
+[ ! -e wan-called ] && grep -q 'current-failure-hot-candidate' promoted || exit 11
 """)
 
 GATE = ["wan_recovery_allowed"]
@@ -73,17 +73,17 @@ wan_recovery_allowed && exit 10
 
 # Production run_cycle + recovery + gate: no provider calls/cursors during outage,
 # restart repeats the safe gate, restoration resets peer cursor and starts rank 1.
-engine = ["run_cycle", "recover_offline_best", "promote_hot_standby_on_failure",
-          "wan_recovery_allowed", "wan_recovery_notification", "next_peer_for_rank"]
+engine = ["run_cycle", "recover_offline_best", "promote_hot_candidate",
+          "recover_emergency", "wan_recovery_allowed", "wan_recovery_notification", "next_peer_for_rank"]
 stubs = r"""
-SLOTS='wgclient1 wgclient2 wgclient3'; STANDBY_ATTEMPTS=1
+SLOTS='wgclient1 wgclient2 wgclient3'; DOWNTIER_ATTEMPTS=1
 result=1; blocked=0
 wan_probe_round() { echo probe >> probes; return "$result"; }
 maybe_clear_expired_backoff() { :; }
 in_backoff() { [ "$blocked" = 1 ]; }
-reconcile_roles() { echo 'wgclient1|11|3|3||wgclient3|0'; }
+reconcile_roles() { echo 'wgclient1|11|3|3|||0'; }
 iface_healthy() { return 1; }
-active_iface() { echo wgclient1; }
+current_iface() { echo wgclient1; }
 free_slot() { echo wgclient2; }
 rank_order() { printf '1\n2\n3\n'; }
 rank_has_peers() { return 0; }
@@ -94,7 +94,8 @@ prepare_iface() { echo "$*" >> candidates; return 0; }
 promote_iface() { echo "$*" >> promotions; return 0; }
 iface_summary() { echo healthy; }
 notify() { echo "$*" >> notifications; return 1; }
-ensure_standby() { :; }
+ensure_downtier() { :; }
+refresh_detector_roles() { :; }
 """
 check(engine, stubs, r"""
 echo 11 > cursor.rank1
@@ -166,7 +167,7 @@ uci() { exit 92; }
 iptables() {
     [ "$1 $2 $3 $4" = '-w 2 -t mangle' ] || exit 93
     shift 4; op="$1"; shift
-    [ "$*" = 'OUTPUT -o uplink9 -s 192.0.2.2/32 -d 1.1.1.1/32 -p icmp --icmp-type echo-request -m owner --uid-owner 0 -m comment --comment vpn-watch-wan-probe -j ACCEPT' ] || exit 94
+    [ "$*" = 'OUTPUT -o uplink9 -s 192.0.2.2/32 -d 1.1.1.1/32 -p icmp --icmp-type echo-request -m owner --uid-owner 0 -m comment --comment hotswapper-wan-probe -j ACCEPT' ] || exit 94
     echo "$op" >> firewall
     case "$op" in
         -C) [ -f rule ];;
@@ -209,6 +210,7 @@ check(["show_status"], r"""
 reconcile_roles() { echo 'wgclient1|11|1|1|wgclient2|wgclient3|2'; }
 iface_summary() { echo healthy; }
 backoff_until() { echo 0; }
+in_backoff() { return 1; }
 now() { echo 100; }
 policy_get() { echo 1; }
 """, r"""
@@ -230,8 +232,9 @@ prepare = function("prepare_iface").replace('/usr/bin/setup_instance', 'setup_in
 for message in ["API limit triggered", "20001220", "device limit reached"]:
     check(["is_limit_error_text", "is_rate_error_text"], prepare + r"""
 in_backoff() { return 1; }
-active_iface() { echo wgclient1; }
+current_iface() { echo wgclient1; }
 teardown_iface() { :; }
+slow_command() { shift; setup_instance "$@" > "$RUNTIME_DIR/command-output"; }
 peer_name() { :; }
 peer_location() { :; }
 set_nord_backoff() { echo "$*" > backoff; }
@@ -240,8 +243,8 @@ setup_instance() { echo '""" + message + r"""'; return 1; }
 prepare_iface wgclient2 12 emergency
 [ $? -eq 3 ] && [ -s backoff ] || exit 10
 """)
-# Missing ACTIVE (including a fresh reboot) is gated before any peer selection.
-check(engine, stubs + "\nreconcile_roles() { echo '||||||'; }\n", r"""
+# Missing CURRENT (including a fresh reboot) is gated before any peer selection.
+check(engine, stubs + "\nreconcile_roles() { echo '||||||'; }\ncurrent_iface() { echo; }\n", r"""
 run_cycle || exit 10
 [ ! -e candidates ] && [ "$(cat wan-state)" = WAN_SUSPECT ] || exit 11
 run_cycle || exit 12

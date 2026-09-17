@@ -60,10 +60,10 @@ public class SecondPassTests
     [Fact] public void RuntimeClassificationChecksActualPeerAndRoles()
     {
         var c=Config();
-        const string good="active_iface=wgclient1\nactive_peer=11\nactive_rank=1\nactive_tier=1\nstandby_iface=\nstandby_peer=\nrecovery_iface=wgclient2\n";
+        const string good="current_iface=wgclient1\ncurrent_peer=11\ncurrent_rank=1\ncurrent_tier=1\ndowntier_iface=\ndowntier_peer=\nuptier_iface=\n";
         Assert.True(RuntimeValidation.IsHealthy(good,c));
-        Assert.False(RuntimeValidation.IsHealthy(good.Replace("active_peer=11","active_peer=999"),c));
-        Assert.False(RuntimeValidation.IsHealthy(good.Replace("recovery_iface=wgclient2","recovery_iface=wgclient1"),c));
+        Assert.False(RuntimeValidation.IsHealthy(good.Replace("current_peer=11","current_peer=999"),c));
+        Assert.False(RuntimeValidation.IsHealthy(good.Replace("uptier_iface=","uptier_iface=wgclient1"),c));
     }
     [Fact] public async Task RealTransactionCanCompleteWithVerifiedPreconditions()
     {
@@ -150,7 +150,7 @@ public class SecondPassTests
             }
             else if(cmd=="ubus call system board") result="{\"model\":\"GL.iNet GL-MT5000\",\"board_name\":\"glinet,gl-mt5000\"}";
             else if(cmd.StartsWith("sha256sum /usr/bin/rtp2.sh")) result=FirmwareHash;
-            else if(cmd.StartsWith("sha256sum /root/.hotswap-installer/run/rtp2.preview")) result=CompatibilityCatalog.PatchedHash;
+            else if(cmd.StartsWith("sha256sum /root/hotswapper/installer/run/rtp2.preview")) result=CompatibilityCatalog.PatchedHash;
             else if(cmd is "uci -q get route_policy.vpn.killswitch || true" or "uci -q get route_policy.vpn.enabled || true") result="1";
             else if(cmd=="uci -q get glipv6.globals.enabled || true") result="0";
             else if(cmd=="uci -q get route_policy.vpn.mark") result="0x1000";
@@ -165,12 +165,12 @@ public class SecondPassTests
             else if(cmd.StartsWith("uci -q get network.wgclient1.config")) result="peer_11";
             else if(cmd=="uci -q get wireguard.peer_11.location") result="Germany,Frankfurt";
             else if(cmd.StartsWith("uci -q show route_policy")) result="vpn";
-            else if(cmd.StartsWith("grep -Fc '# vpn-watch")) result=CompatibilityCatalog.IsPatched(FirmwareHash)?"1":"0";
+            else if(cmd.StartsWith("grep -Fc '# hotswapper")) result=CompatibilityCatalog.IsPatched(FirmwareHash)?"1":"0";
             else if(cmd==HotswapRuntime.ScanCommand) result=Running?"123 1 daemon":"";
             else if(cmd==HotswapRuntime.PidCommand) result=Running?"123":"";
             else if(cmd.StartsWith("crontab -l")) result=Cron;
-            else if(cmd.Contains("&& crontab /root/")) Cron=Uploads["/root/.hotswap-installer/run/cron"];
-            else if(cmd.StartsWith("set -e; test ! -L '/root/.hotswap-installer/backups/"))
+            else if(cmd.Contains("&& crontab /root/")) Cron=Uploads["/root/hotswapper/installer/run/cron"];
+            else if(cmd.StartsWith("set -e; test ! -L '/root/hotswapper/installer/backups/"))
             {
                 var match=Regex.Match(cmd,@"sha256sum '([^']+)'");
                 var path=match.Groups[1].Value;
@@ -178,24 +178,24 @@ public class SecondPassTests
             }
             else if(cmd.Contains(".hotswap-restore"))
             {
-                var match=Regex.Match(cmd,@"cp '/root/.hotswap-installer/backups/([^']+)' '([^']+)\.hotswap-restore'");
+                var match=Regex.Match(cmd,@"cp '/root/hotswapper/installer/backups/([^']+)' '([^']+)\.hotswap-restore'");
                 if(match.Success) {
                     if(match.Groups[2].Value=="/usr/bin/rtp2.sh") FirmwareHash=match.Groups[1].Value;
                     else Installed[match.Groups[2].Value]=Backups[match.Groups[1].Value];
                 }
             }
-            else if(cmd.Contains("cp -p '/root/.hotswap-installer/run/"))
+            else if(cmd.Contains("cp -p '/root/hotswapper/installer/run/"))
             {
                 var match=Regex.Match(cmd,@"cp -p '([^']+)' '([^']+)\.hotswap-new'");
                 Installed[match.Groups[2].Value]=Uploads[match.Groups[1].Value];
             }
-            else if(cmd=="/root/install-vpn-watch-gl-guard.sh --install")
+            else if(cmd=="/root/hotswapper/install-gl-guard.sh --install")
             { if(RejectPatch)throw new SafeFailure("The GL reconciliation guard rejected this firmware."); FirmwareHash=CompatibilityCatalog.PatchedHash;RealPatches++; }
-            else if(cmd.Contains("/root/vpn-watch-supervisor.sh --installer")) Running=true;
+            else if(cmd.Contains("/root/hotswapper-supervisor.sh --installer")) Running=true;
             else if(cmd.Contains("kill -TERM ")) Running=false;
-            else if(cmd=="/root/vpn-watch.sh status") result="ACTIVE: wgclient1 peer=11 tier=1\nPRECOOKED: none\nRECOVERY: wgclient2\n";
-            else if(cmd.StartsWith("if [ -f /tmp/vpn-watch/state"))
-                result="active_iface=wgclient1\nactive_peer=11\nactive_rank=1\nactive_tier=1\nstandby_iface=\nstandby_peer=\nrecovery_iface=wgclient2\n";
+            else if(cmd=="/root/hotswapper-main.sh status") result="CURRENT: wgclient1 peer=11 tier=1\nDOWNTIER: none\nUPTIER: none\n";
+            else if(cmd.StartsWith("if [ -f /tmp/hotswapper/state"))
+                result="current_iface=wgclient1\ncurrent_peer=11\ncurrent_rank=1\ncurrent_tier=1\ndowntier_iface=\ndowntier_peer=\nuptier_iface=\n";
             else if(cmd.StartsWith("if [ -f '"))
             {
                 var path=Regex.Match(cmd,@"if \[ -f '([^']+)'").Groups[1].Value;
@@ -203,11 +203,11 @@ public class SecondPassTests
             }
             else if(cmd.StartsWith("rm -f '"))
                 Installed.Remove(Regex.Match(cmd,@"rm -f '([^']+)'").Groups[1].Value);
-            else if (!new[] { "test ", "set -e; test ", "sh -n ", "sh /root/.hotswap-installer/run/", "cp /usr/bin/rtp2.sh ",
-                "if [ -e '/root/.hotswap-installer/transaction'", "if [ -e '/tmp/vpn-watch-installer-lock'", "if ip link show wgclient", "grep -Fxq ",
+            else if (!new[] { "test ", "set -e; test ", "sh -n ", "sh /root/hotswapper/installer/run/", "cp /usr/bin/rtp2.sh ",
+                "if ip link show wgclient", "grep -Fxq ",
                 "uci -q get network.wgclient2.config", "uci -q get network.wgclient3.config", "uci -q show dhcp",
                 "if [ -r /tmp/dhcp.leases", "ip -4 neigh show", "ip -o -4 addr show", "if uci -q get dhcp.",
-                "/etc/init.d/dnsmasq reload", "wg show ", "rm -rf /root/.hotswap-installer/run" }.Any(cmd.StartsWith))
+                "/etc/init.d/dnsmasq reload", "wg show ", "rm -rf /root/hotswapper/installer/run" }.Any(cmd.StartsWith))
                 throw new InvalidOperationException("Unexpected fixture command: " + cmd);
             return Task.FromResult(result);
         }

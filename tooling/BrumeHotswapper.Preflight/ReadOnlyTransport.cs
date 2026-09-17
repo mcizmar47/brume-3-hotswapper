@@ -9,7 +9,7 @@ public sealed class ReadOnlyTransport(IRouterTransport inner) : IRouterTransport
 {
     public static readonly string Policies = "uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.tunnel_id='\\([0-9]*\\)'$/\\1 \\2/p\"";
     public static readonly string Hosts = "uci -q show dhcp | sed -n 's/^dhcp\\.\\([^.=]*\\)=host$/\\1/p'";
-    public static readonly string Daemons = "for f in /proc/[0-9]*/cmdline; do [ -r \"$f\" ] || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq '/root/vpn-watch.sh' || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq daemon || continue; basename \"$(dirname \"$f\")\"; done";
+    public static readonly string Daemons = "for f in /proc/[0-9]*/cmdline; do [ -r \"$f\" ] || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq '/root/hotswapper-main.sh' || continue; tr '\\000' '\\n' < \"$f\" | grep -Fxq daemon || continue; basename \"$(dirname \"$f\")\"; done";
     public static string SlotReferences(string slot) => $"uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.via='{slot}'$/\\1/p\"";
     public static string ProfileMembers(string tunnel) => $"sed -n '/^[0-9][0-9]*_[0-9][0-9]*$/p' /etc/vpn_profiles.d/profile{tunnel}";
     private static readonly HashSet<string> Exact = [Policies, Hosts, Daemons, RouterPrerequisites.CapabilitiesCommand,
@@ -19,11 +19,10 @@ public sealed class ReadOnlyTransport(IRouterTransport inner) : IRouterTransport
         "ip -4 rule show", "ip -4 neigh show", "ip -o -4 addr show", "ip -o -4 addr show | awk '{print $4}'",
         "if [ -r /tmp/dhcp.leases ]; then cat /tmp/dhcp.leases; fi",
         "crontab -l 2>/dev/null || true", "date +%s", "sh -n /usr/bin/rtp2.sh",
-        "grep -Fc '# vpn-watch GL reconciliation guard v1' /usr/bin/rtp2.sh || true",
+        "grep -Fc '# hotswapper GL reconciliation guard v1' /usr/bin/rtp2.sh || true",
         "grep -Fxc 'cmd=\"$1\";shift' /usr/bin/rtp2.sh || true",
-        "if [ -f /tmp/vpn-watch/state ]; then cat /tmp/vpn-watch/state; fi",
-        "if [ -f /root/vpn-watch-locations.tsv ]; then cat /root/vpn-watch-locations.tsv; fi",
-        "if [ -e /root/.hotswap-installer/transaction ] || [ -e /tmp/vpn-watch-installer-lock ]; then echo pending; else echo clear; fi",
+        "if [ -f /tmp/hotswapper/state ]; then cat /tmp/hotswapper/state; fi",
+        "if [ -f /root/hotswapper/hotswapper-locations.tsv ]; then cat /root/hotswapper/hotswapper-locations.tsv; fi",
         "if [ -z \"$(uci changes dhcp)\" ]; then echo false; else echo true; fi"];
     public static bool IsAllowed(string command)
     {

@@ -9,14 +9,13 @@ public static class CompatibilityCatalog
 {
     public const string StockHash = "749518706ad6af15104c90ddba5aa99142e1a9c678fec9074cd4222f8595f82c";
     public static readonly HashSet<string> TestedFirmware = ["4.9.0"];
-    // Both exact stock-plus-guard forms are reproduced in tooling/verify_guard_archive.py.
-    public const string PatchedHash = "c46469acec44023282fd1d6f729f34ab1b7fd5020ed0c83fc1852a091c2bf075";
-    public const string HistoricalPatchedHash = "5b1a898d8a4943d256f0674c0050519f1ec1353327f7de0778e1c760d3e57704";
-    public static bool IsPatched(string hash) => Classify(hash) is Compatibility.AlreadyPatchedKnownCompatible or Compatibility.HistoricalGuardKnownCompatible;
+    // Current-layout guard is reproduced in memory by tooling/verify_guard_archive.py.
+    public const string PatchedHash = "5c4b26eebdd3cdb6876b7b5e9f48901d8061b525837c1d879f0d059d856f150c";
+    public static bool IsPatched(string hash) => Classify(hash) is Compatibility.AlreadyPatchedKnownCompatible;
     public static readonly HashSet<string> IncompatibleHashes = new(StringComparer.OrdinalIgnoreCase);
     public static Compatibility Classify(string hash) => IncompatibleHashes.Contains(hash) ? Compatibility.KnownIncompatible
         : hash.Equals(StockHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.StockKnownCompatible
-        : hash.Equals(PatchedHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.AlreadyPatchedKnownCompatible : hash.Equals(HistoricalPatchedHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.HistoricalGuardKnownCompatible : Compatibility.Unknown;
+        : hash.Equals(PatchedHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.AlreadyPatchedKnownCompatible : Compatibility.Unknown;
 }
 public interface IVpnLocationResolver { IReadOnlyList<VpnLocationGroup> Group(IEnumerable<VpnConnection> peers); }
 // Verified GL 4.9.0 country,city metadata. Identity is scoped to this provider layout,
@@ -71,13 +70,13 @@ public static class ConfigurationGenerator
 }
 public static class CronPlanner
 {
-    public const string Supervisor = "*/5 * * * * /root/vpn-watch-supervisor.sh";
-    public const string Maintenance = "0 3-14 * * * /root/conditional-reboot.sh";
+    public const string Supervisor = "*/5 * * * * /root/hotswapper-supervisor.sh";
+    public const string Maintenance = "0 3-14 * * * /root/hotswapper-housekeeping.sh";
     public static string Generate(string existing, bool maintenance)
     {
         var lines = existing.Replace("\r", "").Split('\n').Where(l => l.Length > 0 && l.Trim() != Supervisor && l.Trim() != Maintenance).ToList();
-        // Refuse ambiguous legacy entries instead of deleting unrelated commands that happen to mention a script.
-        if (lines.Any(l => !l.TrimStart().StartsWith('#') && (l.Contains("/root/vpn-watch-supervisor.sh") || l.Contains("/root/conditional-reboot.sh"))))
+        // Refuse ambiguous owned entries instead of deleting unrelated commands that happen to mention a script.
+        if (lines.Any(l => !l.TrimStart().StartsWith('#') && (l.Contains("/root/hotswapper-supervisor.sh") || l.Contains("/root/hotswapper-housekeeping.sh"))))
             throw new SafeFailure("A custom cron command references Hotswapper. Resolve it before installation.");
         lines.Add(Supervisor); if (maintenance) lines.Add(Maintenance); return string.Join('\n', lines) + "\n";
     }
@@ -109,7 +108,7 @@ public static class InstallationPlanner
     {
         ConfigurationGenerator.Validate(c);
         var names = new List<string> { "Preflight prerequisites", "Revalidate identity and compatibility", "Back up affected files",
-            "Upload watchdog, supervisor and conditional reboot", "Install private configuration and location pools" };
+            "Upload Hotswapper, supervisor and housekeeping", "Install private configuration and location pools" };
         if (c.Maintenance && c.Guards.Count > 0) names.Add("Validate and reserve reboot guard addresses");
         names.AddRange(["Apply structural GL reconciliation guard", "Update owned cron entries", "Restart supervisor", "Validate runtime and kill switch"]);
         return names.Select((n, i) => new InstallationStep(n, i >= 2)).ToArray();

@@ -1,100 +1,55 @@
-"""Read-only archive reconciliation. Firmware bytes stay in memory; never runs a router script."""
+"""Reproduce current guard in memory. Never store or execute proprietary firmware."""
 import argparse
 import difflib
 import hashlib
-import json
 import os
 import pathlib
 import re
 import subprocess
-import tarfile
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-STOCK = '749518706ad6af15104c90ddba5aa99142e1a9c678fec9074cd4222f8595f82c'
-REPORTED = '5b1a898d8a4943d256f0674c0050519f1ec1353327f7de0778e1c760d3e57704'
-PATCHER = '825b94dd28154ea5d673406dfd43a817641fa5fb77bb60b67edb5cd3ba6bada0'
-MARKER = b'# vpn-watch GL reconciliation guard v1'
-
-def sha(data):
-    return hashlib.sha256(data).hexdigest()
-
-def members(path):
-    if path.suffix == '.zip':
-        with zipfile.ZipFile(path) as archive:
-            for entry in archive.infolist():
-                if not entry.is_dir():
-                    yield archive.read(entry)
-    elif path.name.endswith(('.tar', '.tar.gz')):
-        with tarfile.open(path) as archive:
-            for entry in archive:
-                if entry.isfile():
-                    yield archive.extractfile(entry).read()
+STOCK = "749518706ad6af15104c90ddba5aa99142e1a9c678fec9074cd4222f8595f82c"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('archive', type=pathlib.Path)
-    parser.add_argument('shell', type=pathlib.Path)
+    parser.add_argument("archive", type=pathlib.Path)
+    parser.add_argument("shell", type=pathlib.Path)
+    parser.add_argument("--print-hash", action="store_true")
     args = parser.parse_args()
-    patcher = (ROOT / 'firmware/install-vpn-watch-gl-guard.sh').read_bytes().replace(b'\r\n', b'\n')
-    historical = (args.archive / 'install-vpn-watch-gl-guard-v1.sh').read_bytes().replace(b'\r\n', b'\n')
-    assert sha(patcher) == PATCHER and patcher == historical, 'Patcher changed: inspect before reproducing'
-    with zipfile.ZipFile(args.archive / 'brume_dump.zip') as archive:
-        stock = archive.read('brume_dump/bin/rtp2.sh')
-    assert sha(stock) == STOCK
-    text = patcher.decode('utf-8')
-    start = text.index('    awk -v anchor=')
-    end = text.index(' > "$tmp" || {', start)
-    generation = text[start:end]
-    assert generation.endswith(' "$TARGET"')
-    # Execute only the repository-owned awk generator, feeding firmware via stdin.
-    generation = generation.removesuffix(' "$TARGET"')
     env = dict(os.environ)
-    env['PATH'] = str(args.shell.parent) + os.pathsep + env.get('PATH', '')
-    def generate(data):
-        result = subprocess.run([str(args.shell), '-c', "ANCHOR='cmd=\"$1\";shift'\n" + generation], input=data, capture_output=True, env=env)
-        assert result.returncode == 0, 'Guard generation failed (output withheld)'
+    env["PATH"] = str(args.shell.parent) + os.pathsep + env.get("PATH", "")
+    with zipfile.ZipFile(args.archive / "brume_dump.zip") as archive:
+        stock = archive.read("brume_dump/bin/rtp2.sh")
+    assert hashlib.sha256(stock).hexdigest() == STOCK
+    def generate(patcher):
+        text = patcher.read_text(encoding="utf-8")
+        start = text.index("    awk -v anchor=")
+        end = text.index(' > "$tmp" || {', start)
+        generator = text[start:end].removesuffix(' "$TARGET"')
+        result = subprocess.run([str(args.shell), "-c", "ANCHOR='cmd=\"$1\";shift'\n" + generator], input=stock, capture_output=True, env=env)
+        assert result.returncode == 0, "Generator failed; output withheld"
         return result.stdout
-    patched = generate(stock)
-    catalog = (ROOT / 'BrumeHotswapper.Installer/Core/Planning.cs').read_text(encoding='utf-8')
-    expected = re.search(r'const string PatchedHash = "([a-f0-9]{64})"', catalog)[1]
-    assert sha(patched) == expected
-    # The archived generator's printf format can retain a backslash-n instead of a
-    # literal newline. Only touch that guard-owned format, never proprietary code.
-    historical_patched = patched.replace(b"args=%s\n", b"args=%s\\n", 1)
-    historical_line = next(l for l in historical_patched.splitlines() if b"printf '" in l and b"args=%s" in l)
-    assert len(historical_line) == 100
-    assert sha(historical_line) == '7ec93c0e599a82a581aa3ab906eb221794bb14e4972488c1dfa193a7410e041a'
-    assert len(historical_patched) == 81001 and sha(historical_patched) == REPORTED
-    # Compare shell printf semantics using only the format strings, no router execution.
-    for fmt in [b"%s pid=%s cmd=%s args=%s\n", b"%s pid=%s cmd=%s args=%s\\n"]:
-        output = subprocess.run([str(args.shell)], input=b"printf '" + fmt + b"' 1 2 3 4", capture_output=True, env=env)
-        assert output.returncode == 0 and output.stdout == b'1 pid=2 cmd=3 args=4\n'
-    print('PASS: historical 5b1a full hash, 81001 bytes, exact 100-byte line hash, equivalent printf newline semantics')
-
+    patched = generate(ROOT / "firmware/install-gl-guard.sh")
+    # This is an immutable historical archive filename, not a deployment path.
+    historical = generate(args.archive / "install-vpn-watch-gl-guard-v1.sh")
+    renamed = historical.replace(b"vpn-watch", b"hotswapper").replace(b"VPN_WATCH", b"HOTSWAPPER").replace(b"vpn_watch", b"hotswapper")
+    assert patched == renamed, "Guard behavior changed beyond names/runtime directory"
     before, after = stock.splitlines(keepends=True), patched.splitlines(keepends=True)
-    changes = [op for op in difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes() if op[0] != 'equal']
-    assert len(changes) == 1 and changes[0][0] == 'insert'
+    changes = [x for x in difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes() if x[0] != "equal"]
+    assert len(changes) == 1 and changes[0][0] == "insert"
     _, i, j, a, b = changes[0]
-    assert before[i - 1] == b'cmd="$1";shift\n'
-    assert b''.join(after[:a] + after[b:]) == stock
-    assert patched.count(MARKER) == 1
-    syntax = subprocess.run([str(args.shell), '-n'], input=patched, capture_output=True, env=env)
-    assert syntax.returncode == 0, 'Generated syntax failed (output withheld)'
-    with tarfile.open(args.archive / 'vpn-fastpath-dump.tar.gz') as archive:
-        capture = archive.extractfile('vpn-fastpath-dump/rtp2.sh').read()
-    assert capture == b'=== RTP2 ===\n' + stock
-    counts = {'archive_members': 0, 'reported_hash_matches': 0, 'generated_hash_matches': 0}
-    for path in args.archive.iterdir():
-        for data in members(path):
-            counts['archive_members'] += 1
-            counts['reported_hash_matches'] += sha(data) == REPORTED
-            counts['generated_hash_matches'] += sha(data) == expected
-    # Output metadata only, never archived content or private identifiers.
-    print(json.dumps(dict(stock_sha=sha(stock), patched_sha=sha(patched), patcher_lf_sha=sha(patcher),
-        stock_bytes=len(stock), patched_bytes=len(patched), inserted_lines=b-a,
-        inserted_bytes=len(patched)-len(stock), stock_preserved=True,
-        capture_difference='13-byte capture heading only', patched_capture_sha=sha(generate(capture)), **counts), indent=2))
+    assert before[i-1] == b'cmd="$1";shift\n'
+    assert b"".join(after[:a] + after[b:]) == stock
+    assert patched.count(b"# hotswapper GL reconciliation guard v1") == 1
+    assert b'HOTSWAPPER_GUARD_DIR="/tmp/hotswapper"' in patched
+    assert subprocess.run([str(args.shell), "-n"], input=patched, capture_output=True, env=env).returncode == 0
+    digest = hashlib.sha256(patched).hexdigest()
+    if not args.print_hash:
+        catalog = (ROOT / "BrumeHotswapper.Installer/Core/Planning.cs").read_text(encoding="utf-8")
+        assert re.search(r'const string PatchedHash = "([a-f0-9]{64})"', catalog)[1] == digest
+    print("PASS: original firmware preserved byte-for-byte; guard changes only names/directory; shell syntax valid")
+    print("Current guarded SHA256: " + digest)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

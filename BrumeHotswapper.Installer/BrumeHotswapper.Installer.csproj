@@ -10,7 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="SSH.NET" Version="2026.0.0" />
-    <Content Include="../vpn-watch.sh;../vpn-watch-supervisor.sh;../conditional-reboot.sh;../firmware/install-vpn-watch-gl-guard.sh">
+    <Content Include="../hotswapper-main.sh;../hotswapper-supervisor.sh;../hotswapper-housekeeping.sh;../firmware/install-gl-guard.sh">
       <Link>RouterAssets/%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

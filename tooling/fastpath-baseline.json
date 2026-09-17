@@ -6,9 +6,5 @@
   "fastpath_verify_kernel": "ec966e7b326e08901cbdaf32b8379017b561d2fb51f9e01a6628fa1a073de532",
   "fastpath_verify_consistency": "04a1dccddd176ed0b21eb303978a390bf30de16a9ad9ec9ea7a41b49957f1b7b",
   "fastpath_rollback": "0ed8e78d5c145ad97e5cad535c4a22544192c70dd88e591776d2ca33821af86b",
-  "free_slot": "21b400db918ddbd18e3e9c3a0c1a21fa8d9c9132d8cfde1307cb66e4ee5042c7",
-  "reconcile_roles": "1904e2205a35d732ee0a5fb82fd9951d4bd0d1348a6a3d3894f6297ed4e35632",
-  "promote_hot_standby_on_failure": "dbf283309399682bbe7a64be889a1e2508dcfbafde6a983fc2445c32b0180e3d",
-  "next_lower_rank": "1a518e43c985d0f69b1a4d115429b054aa5d5e1f4e3e51a8ea792bdbd66dbc1a",
-  "ensure_standby": "fd1391e2b0abd5b0c40985300e75ba25f7fa164128a0db0d3048e673e74a69cb"
+  "next_lower_rank": "1a518e43c985d0f69b1a4d115429b054aa5d5e1f4e3e51a8ea792bdbd66dbc1a"
 }

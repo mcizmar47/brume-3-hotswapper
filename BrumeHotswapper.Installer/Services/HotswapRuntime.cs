@@ -5,9 +5,9 @@ namespace BrumeHotswapper.Installer.Services;
 // Match complete argv shapes, never substrings of a command or a shell -c argument.
 public sealed class HotswapRuntime(IRouterTransport router, Func<CancellationToken,Task>? pause = null)
 {
-    public const string MatchFunction = "owned() { tr '\\000' '\\n' < \"$1\" | awk 'NR==1 && ($0==\"/bin/sh\" || $0==\"/bin/ash\" || $0==\"sh\" || $0==\"ash\") {next} {a[++n]=$0} END {if(n==2 && a[1]==\"/root/vpn-watch.sh\" && (a[2]==\"daemon\" || a[2]==\"run\")) print \"daemon\"; else if(a[1]==\"/root/vpn-watch-supervisor.sh\" && (n==1 || (n==2 && a[2]==\"--installer\"))) print \"supervisor\"}'; }";
+    public const string MatchFunction = "owned() { tr '\\000' '\\n' < \"$1\" | awk 'NR==1 && ($0==\"/bin/sh\" || $0==\"/bin/ash\" || $0==\"sh\" || $0==\"ash\") {next} {a[++n]=$0} END {if(n==2 && a[1]==\"/root/hotswapper-main.sh\" && (a[2]==\"daemon\" || a[2]==\"run\")) print \"daemon\"; else if(a[1]==\"/root/hotswapper-supervisor.sh\" && (n==1 || (n==2 && a[2]==\"--installer\"))) print \"supervisor\"}'; }";
     public const string ScanCommand = MatchFunction + "; for f in /proc/[0-9]*/cmdline; do [ -r \"$f\" ] || continue; kind=$(owned \"$f\"); [ -n \"$kind\" ] || continue; pid=${f#/proc/}; pid=${pid%/cmdline}; parent=$(awk '/^PPid:/ {print $2}' /proc/$pid/status 2>/dev/null); printf '%s %s %s\\n' \"$pid\" \"$parent\" \"$kind\"; done";
-    public const string PidCommand = "if [ -r /tmp/vpn-watch/lock/pid ]; then cat /tmp/vpn-watch/lock/pid; fi";
+    public const string PidCommand = "if [ -r /tmp/hotswapper/lock/pid ]; then cat /tmp/hotswapper/lock/pid; fi";
     public sealed record Process(string Pid,string Parent,string Kind);
     public static IReadOnlyList<Process> Roots(string snapshot)
     {
@@ -29,7 +29,7 @@ public sealed class HotswapRuntime(IRouterTransport router, Func<CancellationTok
             var processes=await ReadAsync(ct);
             if(processes.Count==0) { if(++clear==2) {
                 // No owned supervisor remains. Remove only its empty startup mutex, never daemon state.
-                await router.ExecuteAsync("test ! -L /tmp/vpn-watch/supervisor-start && { [ ! -d /tmp/vpn-watch/supervisor-start ] || rmdir /tmp/vpn-watch/supervisor-start; }",ct);
+                await router.ExecuteAsync("test ! -L /tmp/hotswapper/supervisor-start && { [ ! -d /tmp/hotswapper/supervisor-start ] || rmdir /tmp/hotswapper/supervisor-start; }",ct);
                 return;
             }} else {
                 clear=0;
@@ -37,7 +37,7 @@ public sealed class HotswapRuntime(IRouterTransport router, Func<CancellationTok
             }
             await Pause(ct);
         }
-        throw new SafeFailure("Owned watchdog/supervisor processes did not stop within 10 seconds; no unrelated process or force-kill was used.");
+        throw new SafeFailure("Owned Hotswapper/supervisor processes did not stop within 10 seconds; no unrelated process or force-kill was used.");
     }
     public async Task WaitForOneAsync(CancellationToken ct)
     {
@@ -52,6 +52,6 @@ public sealed class HotswapRuntime(IRouterTransport router, Func<CancellationTok
             } else previous="";
             await Pause(ct);
         }
-        throw new SafeFailure("Watchdog did not settle to one lock-owning process within 10 seconds.");
+        throw new SafeFailure("Hotswapper did not settle to one lock-owning process within 10 seconds.");
     }
 }

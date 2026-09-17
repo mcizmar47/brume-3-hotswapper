@@ -1,3 +1,5 @@
+> Historical record from before the directional-role/layout refactor. For the current implementation, paths, guard hash and validation results, see [Hotswapper runtime](hotswapper-runtime.md).
+
 # Deterministic installer and legacy migration
 
 > Current behavior: [repair-capable installation](repair-installer.md). This supersedes the persistent transaction/recovery descriptions below. Old bookkeeping is archived and never gates installation.

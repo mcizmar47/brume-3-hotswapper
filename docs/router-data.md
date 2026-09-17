@@ -1,3 +1,5 @@
+> Historical archive evidence. Current roles, paths and guard compatibility are defined in [Hotswapper runtime](hotswapper-runtime.md).
+
 # Router evidence and supported layout
 
 ## Evidence inspected locally (2026-09-15)

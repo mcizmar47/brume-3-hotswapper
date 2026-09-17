@@ -26,14 +26,14 @@ public class PreflightFollowUpTests
     }
     private static string Metadata(string mode = "755", string uid = "0", string gid = "0", string symlink = "0") =>
         $"symlink={symlink}\r\nexists=1\r\ntype=-\r\nregular=1\r\nreadable=1\r\nuid={uid}\r\ngid={gid}\r\nmode={mode}\r\nsize=1234\r\nsha256={new string('a',64)}\r\n";
-    [Fact] public void LegacyScript755IsMigrationWarningAndFirmware755Passes()
+    [Fact] public void RepairableScript755WarnsAndFirmware755Passes()
     {
-        var script = MetadataReview.Evaluate("/root/vpn-watch.sh", Metadata());
+        var script = MetadataReview.Evaluate("/root/hotswapper-main.sh", Metadata());
         Assert.DoesNotContain(script, x => x.Status == "BLOCK");
         Assert.Contains(script, x => x.Name.EndsWith(" / mode") && x.Status == "WARN");
         Assert.All(MetadataReview.Evaluate("/usr/bin/rtp2.sh", Metadata()), x => Assert.Equal("PASS", x.Status));
         Assert.Contains(MetadataReview.Evaluate("/usr/bin/rtp2.sh", Metadata("644")), x => x.Name.EndsWith(" / mode") && x.Status == "BLOCK");
-        Assert.Contains(MetadataReview.Evaluate("/root/vpn-watch.conf", Metadata("644")), x => x.Name.EndsWith(" / mode") && x.Status == "WARN");
+        Assert.Contains(MetadataReview.Evaluate("/root/hotswapper/hotswapper.conf", Metadata("644")), x => x.Name.EndsWith(" / mode") && x.Status == "WARN");
     }
     [Theory]
     [InlineData("777", "0", "0", "0", "mode")]
@@ -43,11 +43,11 @@ public class PreflightFollowUpTests
     [InlineData("755", "0", "0", "1", "symlink")]
     public void UnsafeMetadataIsNotNormalizedSilently(string mode,string uid,string gid,string link,string field)
     {
-        Assert.Contains(MetadataReview.Evaluate("/root/vpn-watch.sh", Metadata(mode,uid,gid,link)), x => x.Name.EndsWith(" / " + field) && x.Status == "BLOCK");
+        Assert.Contains(MetadataReview.Evaluate("/root/hotswapper-main.sh", Metadata(mode,uid,gid,link)), x => x.Name.EndsWith(" / " + field) && x.Status == "BLOCK");
     }
-    [Fact] public void ExpectedLegacyAbsenceIsNotCorruption()
+    [Fact] public void MissingGeneratedFileIsNotCorruption()
     {
-        var checks = MetadataReview.Evaluate("/root/vpn-watch-locations.tsv", "symlink=0\nexists=0\n");
+        var checks = MetadataReview.Evaluate("/root/hotswapper/hotswapper-locations.tsv", "symlink=0\nexists=0\n");
         Assert.DoesNotContain(checks, x => x.Status == "BLOCK");
         Assert.Contains(checks, x => x.Detail.Contains("required after installation"));
     }

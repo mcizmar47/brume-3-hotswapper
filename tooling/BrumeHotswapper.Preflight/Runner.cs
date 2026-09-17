@@ -48,7 +48,7 @@ public sealed partial class Runner(SshRouterSession session, Action<Check> repor
             await RoutingDiagnostics.VerifyAsync(read, profile.PolicySection, report, ct);
             await Step("Runtime state", async () => await StateAsync(identity, profile, ct));
         }
-        await Step("Daemon count", async () => { int count = (await inspection.DaemonPidsAsync(ct)).Length; Add("Daemon count", count == 1, $"{count} exact watchdog daemon process(es). No process action performed."); });
+        await Step("Daemon count", async () => { int count = (await inspection.DaemonPidsAsync(ct)).Length; Add("Daemon count", count == 1, $"{count} exact Hotswapper daemon process(es). No process action performed."); });
         await Step("Cron", async () =>
         {
             var cron = await read.ExecuteAsync("crontab -l 2>/dev/null || true", ct);
@@ -78,20 +78,20 @@ public sealed partial class Runner(SshRouterSession session, Action<Check> repor
     }
     private async Task StateAsync(RouterIdentity identity, VpnProfile profile, CancellationToken ct)
     {
-        string snapshot = await read.ExecuteAsync("if [ -f /tmp/vpn-watch/state ]; then cat /tmp/vpn-watch/state; fi", ct);
+        string snapshot = await read.ExecuteAsync("if [ -f /tmp/hotswapper/state ]; then cat /tmp/hotswapper/state; fi", ct);
         var fields = snapshot.Split('\n').Where(l => l.Contains('=')).Select(l => l.Split('=', 2)).ToDictionary(x => x[0], x => x[1].Trim());
         string Get(string key) => fields.GetValueOrDefault(key, "");
-        var roles = new[] { Get("active_iface"), Get("standby_iface"), Get("recovery_iface") }.Where(x => x.Length > 0).ToArray();
-        Add("Runtime role structure", roles.All(x => new[] { "wgclient1", "wgclient2", "wgclient3" }.Contains(x)) && roles.Distinct().Count() == roles.Length && Get("active_iface").Length > 0 && Get("recovery_iface").Length > 0, $"ACTIVE present: {Get("active_iface").Length > 0}; PRECOOKED present: {Get("standby_iface").Length > 0}; RECOVERY present: {Get("recovery_iface").Length > 0}. No transition triggered.");
+        var roles = new[] { Get("current_iface"), Get("downtier_iface"), Get("uptier_iface"), Get("uptier_iface") }.Where(x => x.Length > 0).ToArray();
+        Add("Runtime role structure", roles.All(x => new[] { "wgclient1", "wgclient2", "wgclient3" }.Contains(x)) && roles.Distinct().Count() == roles.Length && Get("current_iface").Length > 0, $"CURRENT present: {Get("current_iface").Length > 0}; DOWNTIER present: {Get("downtier_iface").Length > 0}; UPTIER present: {Get("uptier_iface").Length > 0}. No transition triggered.");
         string policy = RouterInspection.Identifier(profile.PolicySection);
-        Add("Runtime policy agreement", (await read.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim() == Get("active_iface") && (await read.ExecuteAsync($"uci -q get route_policy.{policy}.peer_id", ct)).Trim() == Get("active_peer"), "Compared ACTIVE against live selected policy.");
+        Add("Runtime policy agreement", (await read.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim() == Get("current_iface") && (await read.ExecuteAsync($"uci -q get route_policy.{policy}.peer_id", ct)).Trim() == Get("current_peer"), "Compared CURRENT against live selected policy.");
         long now = long.Parse((await read.ExecuteAsync("date +%s", ct)).Trim());
-        foreach (var iface in new[] { Get("active_iface"), Get("standby_iface") }.Where(x => Regex.IsMatch(x, "^wgclient[123]$")))
+        foreach (var iface in new[] { Get("current_iface"), Get("downtier_iface"), Get("uptier_iface") }.Where(x => Regex.IsMatch(x, "^wgclient[123]$")))
         {
             var timestamps = (await read.ExecuteAsync($"wg show {iface} latest-handshakes | awk '{{print $2}}'", ct)).Split('\n').Where(x => long.TryParse(x, out _)).Select(long.Parse).ToArray();
-            Add(iface == Get("active_iface") ? "ACTIVE handshake" : "PRECOOKED handshake", timestamps.Any(x => x > 0 && now >= x && now-x <= 75), "Checked timestamp freshness only; keys withheld.");
+            Add(iface == Get("current_iface") ? "CURRENT handshake" : iface == Get("uptier_iface") ? "UPTIER handshake" : "DOWNTIER handshake", timestamps.Any(x => x > 0 && now >= x && now-x <= 75), "Checked timestamp freshness only; keys withheld.");
         }
-        var mapping = await read.ExecuteAsync("if [ -f /root/vpn-watch-locations.tsv ]; then cat /root/vpn-watch-locations.tsv; fi", ct);
+        var mapping = await read.ExecuteAsync("if [ -f /root/hotswapper/hotswapper-locations.tsv ]; then cat /root/hotswapper/hotswapper-locations.tsv; fi", ct);
         if (string.IsNullOrWhiteSpace(mapping)) { report(new("RuntimeValidation", "WARN", "Installed locations TSV absent; authoritative rank mapping is unavailable to the generalized validator. No fabricated tier mapping was used.")); return; }
         var rows = mapping.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Split('\t')).ToArray();
         if (rows.Any(x => x.Length != 6 || !int.TryParse(x[0], out _) || !int.TryParse(x[1], out int t) || t < 1 || t > 3)) throw new SafeFailure("Installed location mapping has an unsupported format.");

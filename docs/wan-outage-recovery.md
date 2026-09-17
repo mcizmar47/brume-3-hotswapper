@@ -2,7 +2,7 @@
 
 ## Scope and behavior
 
-The watchdog now checks the underlying IPv4 WAN before emergency or broad VPN recovery. The complete original healthy PRECOOKED promotion branch runs first and makes no WAN probe. Promotion, firewall preparation, mark override, kernel checks, policy commit, GL guard, tier policy and maintenance handling are unchanged.
+The watchdog now checks the underlying IPv4 WAN before emergency or broad VPN recovery. Established directional hot-candidate promotion runs first and makes no WAN probe; Tier 2 prefers UPTIER, then DOWNTIER. Promotion, firewall preparation, mark override, kernel checks, policy commit, GL guard, tier policy and maintenance handling are unchanged.
 
 `wan_device` reads the firmware's firewall zone named `wan`, its configured logical networks, and netifd status (`ubus`, two-second timeout). It selects a corresponding current main-table default device. Neither the logical network nor the device/address is hardcoded. Missing/unsupported context is UNKNOWN; a configured down WAN or missing default is a failed round. This targets the tested GL fw3 layout, not arbitrary firewall architectures or multi-WAN aggregation.
 
@@ -25,17 +25,17 @@ A subshell exit/signal trap removes the exact rule after success or failure. A m
 - UNKNOWN also pauses recovery and is shown distinctly in status. It requires fixing the probe context, not disabling the kill switch.
 - On WAN return, configured peer cursors reset once and broad recovery starts at the best internal rank and first peer. Existing provider backoff, if already active, still applies. The pending flag keeps best-first recovery in use until promotion succeeds.
 - After VPN promotion succeeds, one WAN-restored notification is attempted and the pending flag is cleared. Delivery failure does not affect recovery or cause repeated attempts. Normal major-tier notifications remain. No notification is attempted while the current state is WAN_OFFLINE.
-- Runtime files are under /tmp/vpn-watch. A daemon restart retains an established outage if runtime files remain; a reboot rediscovers it with two rounds before candidate creation. Healthy VPN operation clears stale suspect/unknown status.
+- Runtime files are under /tmp/hotswapper. A daemon restart retains an established outage if runtime files remain; a reboot rediscovers it with two rounds before candidate creation. Healthy VPN operation clears stale suspect/unknown status.
 
 ## Changes and validation
 
-Production changes are confined to vpn-watch.sh: WAN device/probe/state/notification helpers, gates after hot promotion and before offline recovery, run_cycle outage handling, status, notify suppression and outage sleep cadence.
+Production changes are confined to hotswapper-main.sh: WAN device/probe/state/notification helpers, gates after hot promotion and before offline recovery, run_cycle outage handling, status, notify suppression and outage sleep cadence.
 
-The shell suite invokes tooling/test_wan_recovery.py, which executes extracted production functions with strict local command stubs. The historical fastpath baseline still verifies all twelve functions; only the exact two-line WAN gate after the original hot-standby branch is normalized out. The baseline hash file is unchanged.
+The shell suite invokes tooling/test_wan_recovery.py, which executes extracted production functions with strict local command stubs. The original dataplane hashes remain checked after name and detector-bookkeeping normalization. Directional policy has separate behavioral tests; see [current runtime](hotswapper-runtime.md).
 
 Validation for this change:
 
-- 177 .NET tests passed in Release.
+- 193 .NET tests passed in Release.
 - Existing shell/Python regressions and syntax checks passed.
 - 34 new WAN scenarios passed, including hot-standby priority, emergency and broad recovery, two-round confirmation, restart, no churn/backoff, cursor reset, notification failure/one-shot behavior, target fallback, unknown context, WAN discovery, firewall cleanup/reload, both kill-switch settings and real provider error handling.
 - Release solution, installer and read-only preflight utility builds passed with no warnings/errors.
@@ -47,3 +47,5 @@ All tests use local synthetic data; no router connection or installation was per
 Before deploying this behavior, verify on the intended firmware that netifd/zone discovery selects the actual WAN, bound ICMP receives replies through the intended physical path with kill switch ON and OFF, the OUTPUT owner match is supported and counts the diagnostic packets, and cleanup removes the probe rule. Confirm client VPN enforcement remains in place while probing. This is a hardware integration check, not another implementation/preflight subsystem.
 
 ICMP reachability is deliberately the signal, as in the GL monitor. An upstream network that blocks **all four** ICMP targets can appear offline despite TCP connectivity. Conversely one reachable target proves basic WAN reachability, not availability of every provider endpoint. Custom output filters, different policy-routing layouts, or a renamed/missing firmware WAN zone produce UNKNOWN or failed probes and need review rather than a broader bypass.
+
+WAN diagnosis now runs as a supervised one-shot command while the parent daemon owns the serial detector. It is never repeated at detector frequency; known failures request slow recovery once.

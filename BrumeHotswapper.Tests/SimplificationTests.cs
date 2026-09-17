@@ -49,7 +49,7 @@ public class SimplificationTests
     public async Task MigrationAndRepeatedInstallReconcileDuplicateDaemons(bool maintenance)
     {
         var fake=new SecondPassTests.RouterFixture{Running=true,Cron=CronPlanner.Supervisor+"\n"+CronPlanner.Supervisor+"\n15 1 * * * /root/user-job\n"};
-        fake.Installed["/root/vpn-watch.sh"]="legacy script";
+        fake.Installed["/root/hotswapper-main.sh"]="legacy script";
         var router=new Intercept(fake){Duplicates=true};
         var installer=new RouterInstaller(router,new KillSwitchVerifier());
         var c=SecondPassTests.Config() with {Maintenance=maintenance};
@@ -68,15 +68,15 @@ public class SimplificationTests
     [Fact] public async Task PostInstallFailureNamesOperationAndRestartsPreviousRuntime()
     {
         var fake=new SecondPassTests.RouterFixture{Running=true};
-        fake.Installed["/root/vpn-watch.sh"]="old script";
-        fake.Installed["/root/vpn-watch-supervisor.sh"]="old supervisor";
+        fake.Installed["/root/hotswapper-main.sh"]="old script";
+        fake.Installed["/root/hotswapper-supervisor.sh"]="old supervisor";
         var router=new Intercept(fake){FailStatus=true};
         var installer=new RouterInstaller(router,new KillSwitchVerifier());
         var plan=await installer.PlanAsync(SecondPassTests.Config(),default);
         var error=await Assert.ThrowsAsync<SafeFailure>(()=>installer.InstallAsync(plan,new Progress<string>(),default));
-        Assert.Contains("vpn-watch status command",error.Message);Assert.Contains("exit status 7",error.Message);
+        Assert.Contains("hotswapper status command",error.Message);Assert.Contains("exit status 7",error.Message);
         Assert.Contains("rolled back",error.Message);Assert.True(fake.Running);
-        Assert.Equal("old script",fake.Installed["/root/vpn-watch.sh"]);
+        Assert.Equal("old script",fake.Installed["/root/hotswapper-main.sh"]);
     }
     [Fact] public async Task OptionalHandshakeFailureDoesNotInvalidateInstallation()
     {
@@ -92,7 +92,7 @@ public class SimplificationTests
         public Task<string> ExecuteAsync(string c,CancellationToken ct) {
             if(c==HotswapRuntime.ScanCommand&&Duplicates&&inner.Running)return Task.FromResult("123 1 daemon\n124 123 daemon\n125 1 daemon");
             if(c.Contains("kill -TERM")) Duplicates=false;
-            if(c=="/root/vpn-watch.sh status"&&FailStatus){FailStatus=false;throw new RouterCommandFailure(7);}
+            if(c=="/root/hotswapper-main.sh status"&&FailStatus){FailStatus=false;throw new RouterCommandFailure(7);}
             if(c.StartsWith("wg show")&&FailHandshake)throw new RouterCommandFailure(1);
             return inner.ExecuteAsync(c,ct);
         }
@@ -105,7 +105,7 @@ public class SimplificationTests
             Commands.Add(command);
             if(command==HotswapRuntime.ScanCommand)return Task.FromResult(samples[Math.Min(Reads++,samples.Length-1)]);
             if(command==HotswapRuntime.PidCommand)return Task.FromResult("10");
-            if(command.Contains("kill -TERM")||command.StartsWith("test ! -L /tmp/vpn-watch/supervisor-start"))return Task.FromResult("");
+            if(command.Contains("kill -TERM")||command.StartsWith("test ! -L /tmp/hotswapper/supervisor-start"))return Task.FromResult("");
             throw new Exception("Unexpected command");
         }
     }
