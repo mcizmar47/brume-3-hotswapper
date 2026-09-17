@@ -168,5 +168,14 @@ print('PASS: exact argv ownership rejects shell wrappers, unrelated scripts and 
 # Hashes from the locally inspected historical v14.1 functions. No archive files needed.
 # Promotion baseline normalizes only the two notification wording changes.
 for name, expected in json.loads((ROOT / 'tooling/fastpath-baseline.json').read_text()).items():
-    assert hashlib.sha256(function(name).encode()).hexdigest() == expected, name + ' changed unexpectedly'
+    body = function(name)
+    if name == 'promote_hot_standby_on_failure':
+        gate = '    wan_recovery_allowed || return 1\n    [ -f "$WAN_PENDING_FILE" ] && return 1\n\n'
+        assert body.count(gate) == 1
+        body = body.replace(gate, '', 1)
+    assert hashlib.sha256(body.encode()).hexdigest() == expected, name + ' changed unexpectedly'
 print('PASS: shell syntax, exact peer mapping, Tier 2 stickiness, Tier 3 recovery order, guard fail-closed checks, zero/multiple/malformed reboot guards, historical fastpath hashes')
+
+# Same production-function isolation for WAN diagnosis; no router/network calls.
+import runpy
+runpy.run_path(str(ROOT / 'tooling/test_wan_recovery.py'), run_name='__main__')

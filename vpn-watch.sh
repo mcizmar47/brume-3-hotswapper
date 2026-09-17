@@ -17,7 +17,7 @@
 #   - Offline: recover best-to-worst across all configured ranks
 #
 # The hot standby is always the next configured LOWER internal rank.
-# Notifications are sent only when the MAJOR tier changes.
+# Notifications report MAJOR tier changes and recovery from a WAN outage.
 # v14.1: v14 guarded fastpath with detailed promotion timing disabled by default.
 # Set DEBUG_TIMING=1 in /root/vpn-watch.conf to restore promotion-timing.log writes.
 
@@ -33,6 +33,9 @@ LOG_FILE="$PERSIST_DIR/vpn-watch.log"
 LOCK_DIR="$RUNTIME_DIR/lock"
 BACKOFF_FILE="$RUNTIME_DIR/nord-backoff-until"
 LAST_RECOVERY_FILE="$RUNTIME_DIR/last-recovery"
+WAN_STATE_FILE="$RUNTIME_DIR/wan-state"
+WAN_PENDING_FILE="$RUNTIME_DIR/wan-notification-pending"
+WAN_CYCLE_RESULT=""
 PRE_REBOOT_REQUEST_FILE="$RUNTIME_DIR/pre-reboot-request"
 PRE_REBOOT_RESULT_FILE="$RUNTIME_DIR/pre-reboot-result"
 TEST_FAILOVER_REQUEST_FILE="$RUNTIME_DIR/test-failover-request"
@@ -119,6 +122,7 @@ promo_trace() {
 
 notify() {
     local title="$1" rc
+    [ "$(cat "$WAN_STATE_FILE" 2>/dev/null)" = WAN_OFFLINE ] && return 2
     shift
     local body="$*"
     if [ -z "$NTFY_URL" ]; then
@@ -1022,6 +1026,9 @@ promote_hot_standby_on_failure() {
         promote_iface "$standby" "$peer" "active-failure-hot-standby" && return 0
     fi
 
+    wan_recovery_allowed || return 1
+    [ -f "$WAN_PENDING_FILE" ] && return 1
+
     # No usable hot standby. Keep kill switch authoritative while attempting one
     # emergency replacement.
     if in_backoff; then
@@ -1057,6 +1064,127 @@ promote_hot_standby_on_failure() {
     log "CRITICAL: unable to establish emergency VPN replacement; kill switch remains in force"
     notify "VPN unavailable" "The active VPN and hot standby are unavailable, and no emergency VPN replacement connected. Kill switch remains in force; vpn-watch did not force direct WAN."
     return 1
+}
+
+# Discover IPv4 WAN from the firmware firewall WAN zone and netifd, then
+# select its current main-table default device. No fixed logical/device name.
+# 0: usable device; 1: configured WAN down/no default; 2: unknown context.
+wan_device() {
+    local zones zone networks network status dev devices="" seen=0 routes proto
+    zones="$(uci -q show firewall)" || return 2
+    for zone in $(printf '%s\n' "$zones" | sed -n 's/^\(firewall\.[^=]*\)=zone$/\1/p'); do
+        [ "$(uci -q get "$zone.name")" = wan ] || continue
+        networks="$(uci -q get "$zone.network")" || return 2
+        for network in $networks; do
+            case "$network" in ''|*[!a-zA-Z0-9_]*) return 2;; esac
+            status="$(ubus -t 2 call "network.interface.$network" status 2>/dev/null)" || continue
+            seen=1
+            case "$(jsonfilter -s "$status" -e '@.up')" in
+                false) continue;; true) :;; *) return 2;;
+            esac
+            proto="$(jsonfilter -s "$status" -e '@.proto')"
+            case "$proto" in ''|wireguard) return 2;; esac
+            dev="$(jsonfilter -s "$status" -e '@.l3_device')"
+            case "$dev" in ''|lo|wg*|tun*|tap*|*[!a-zA-Z0-9_.:-]*) return 2;; esac
+            devices="$devices $dev"
+        done
+    done
+    [ "$seen" -eq 1 ] || return 2
+    [ -n "$devices" ] || return 1
+    routes="$(ip -4 route show table main default 2>/dev/null)" || return 2
+    for dev in $(printf '%s\n' "$routes" | awk '$1 == "default" {for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}'); do
+        case " $devices " in *" $dev "*) printf '%s\n' "$dev"; return 0;; esac
+    done
+    return 1
+}
+
+# Subshell confines traps to this probe. ACCEPT ends only mangle OUTPUT,
+# ahead of GL LOCAL_POLICY; filter OUTPUT and all client chains stay intact.
+# A stale rule remains restricted to root ICMP to one target on this WAN.
+wan_probe_target() {
+    (
+        dev="$1"; target="$2"
+        route="$(ip -4 route get "$target" oif "$dev" 2>/dev/null)" || exit 2
+        actual="$(printf '%s\n' "$route" | awk 'NR==1 {for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}')"
+        source="$(printf '%s\n' "$route" | awk 'NR==1 {for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')"
+        [ "$actual" = "$dev" ] || exit 2
+        case "$source" in ''|*[!0-9.]*) exit 2;; esac
+        set -- OUTPUT -o "$dev" -s "$source/32" -d "$target/32" -p icmp --icmp-type echo-request \
+            -m owner --uid-owner 0 -m comment --comment vpn-watch-wan-probe -j ACCEPT
+        # Remove an identical SIGKILL leftover, then insert ahead of LOCAL_POLICY.
+        if iptables -w 2 -t mangle -C "$@" 2>/dev/null; then
+            iptables -w 2 -t mangle -D "$@" 2>/dev/null || exit 2
+        fi
+        trap 'iptables -w 2 -t mangle -D "$@" >/dev/null 2>&1 || true' EXIT
+        trap 'exit 2' INT TERM
+        iptables -w 2 -t mangle -I "$@" 2>/dev/null || exit 2
+        ping -n -I "$dev" -c 1 -W 1 -w 2 "$target" >/dev/null 2>&1
+        rc=$?
+        # A firewall reload or unsupported ping is not evidence of WAN failure.
+        iptables -w 2 -t mangle -C "$@" 2>/dev/null || exit 2
+        case "$rc" in 0) exit 0;; 1) exit 1;; *) exit 2;; esac
+    )
+}
+
+wan_probe_round() {
+    local dev rc unknown=0 target
+    dev="$(wan_device)"; rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    # Independent IPv4 targets used by the archived GL kmwan monitor.
+    for target in 1.1.1.1 8.8.8.8 208.67.222.222 208.67.220.220; do
+        wan_probe_target "$dev" "$target"; rc=$?
+        [ "$rc" -eq 0 ] && return 0
+        [ "$rc" -eq 2 ] && unknown=1
+    done
+    [ "$unknown" -eq 0 ] || return 2
+    return 1
+}
+
+# One round per cycle before emergency/broad creation. A suspect round also
+# pauses creation without declaring a confirmed outage.
+wan_recovery_allowed() {
+    local previous rc state rank
+    [ -n "$WAN_CYCLE_RESULT" ] && return "$WAN_CYCLE_RESULT"
+    previous="$(cat "$WAN_STATE_FILE" 2>/dev/null)"
+    wan_probe_round; rc=$?
+    case "$rc" in
+        0)
+            state=WAN_UP
+            if [ -f "$WAN_PENDING_FILE" ] && [ "$previous" != WAN_UP ]; then
+                log "WAN connectivity restored; resuming VPN recovery from best configured rank"
+                # Start at the first peer too, rather than a pre-outage cursor.
+                for rank in $(rank_order); do
+                    rm -f "$PERSIST_DIR/cursor.rank${rank}"
+                done
+            fi
+            WAN_CYCLE_RESULT=0
+            ;;
+        1)
+            state=WAN_SUSPECT
+            case "$previous" in
+                WAN_SUSPECT|WAN_OFFLINE)
+                    state=WAN_OFFLINE
+                    : > "$WAN_PENDING_FILE"
+                    [ "$previous" = WAN_OFFLINE ] || log "WAN_OFFLINE entered; VPN candidate creation paused"
+                    ;;
+                *) log "WAN health suspect; waiting for a second failed round";;
+            esac
+            WAN_CYCLE_RESULT=1
+            ;;
+        *)
+            state=WAN_UNKNOWN
+            [ "$previous" = WAN_UNKNOWN ] || log "WAN probe context unavailable; VPN recovery paused (not a provider failure)"
+            WAN_CYCLE_RESULT=1
+            ;;
+    esac
+    printf '%s\n' "$state" > "$WAN_STATE_FILE"
+    return "$WAN_CYCLE_RESULT"
+}
+
+wan_recovery_notification() {
+    [ -f "$WAN_PENDING_FILE" ] || return 0
+    rm -f "$WAN_PENDING_FILE"
+    notify "WAN connectivity restored" "Underlying WAN connectivity was unavailable and has returned. VPN connectivity is restored." || true
 }
 
 recovery_due() {
@@ -1116,6 +1244,7 @@ probe_recovery_targets() {
 recover_offline_best() {
     local active slot rank peer tries rc old_active
 
+    wan_recovery_allowed || return 1
     in_backoff && {
         log "Offline recovery deferred: Nord auxiliary backoff is active"
         return 1
@@ -1148,6 +1277,7 @@ recover_offline_best() {
                 0)
                     if promote_iface "$slot" "$peer" "offline-recovery"; then
                         log "OFFLINE recovery succeeded: $(iface_summary "$slot")"
+                        wan_recovery_notification
                         return 0
                     fi
                     teardown_iface "$slot" >/dev/null 2>&1 || true
@@ -1167,7 +1297,15 @@ recover_offline_best() {
 run_cycle() {
     local roles active ap ar at standby recovery target_rank rc roles2
 
+    WAN_CYCLE_RESULT=""
     maybe_clear_expired_backoff
+
+    # Confirmed outage: only WAN checks until it returns, then best-first VPN
+    # recovery. Keep this branch until promotion succeeds (including backoff).
+    if [ -f "$WAN_PENDING_FILE" ]; then
+        recover_offline_best || true
+        return 0
+    fi
 
     roles="$(reconcile_roles)"
     IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
@@ -1184,6 +1322,7 @@ EOF
         promote_hot_standby_on_failure "$active" "$ap" "$ar" "$at" "$standby"
         rc=$?
         if [ "$rc" -eq 0 ]; then
+            rm -f "$WAN_STATE_FILE"
             # New ACTIVE first. Only after continuity is restored do we rebuild.
             roles="$(reconcile_roles)"
             IFS='|' read -r active ap ar at standby recovery target_rank <<EOF
@@ -1198,6 +1337,7 @@ EOF
         return 0
     fi
 
+    rm -f "$WAN_STATE_FILE"
     # ACTIVE healthy: priority 2 is maintaining the immediate next-lower
     # INTERNAL rank as an already-connected hot standby.
     ensure_standby "$active" "$ap" "$ar" "$at" "$standby" "$recovery" || true
@@ -1369,6 +1509,11 @@ show_status() {
 $roles
 EOF
 
+    case "$(cat "$WAN_STATE_FILE" 2>/dev/null)" in
+        WAN_OFFLINE) echo "WAN: WAN_OFFLINE (VPN recovery paused)";;
+        WAN_SUSPECT) echo "WAN: suspect (awaiting confirmation)";;
+        WAN_UNKNOWN) echo "WAN: unknown (probe context unavailable; VPN recovery paused)";;
+    esac
     echo "Tunnel: $TUNNEL_ID"
     echo "ACTIVE:     $(iface_summary "$active")"
     if [ -n "$standby" ]; then
@@ -1577,7 +1722,10 @@ daemon_loop() {
         handle_pre_reboot_request
         handle_test_failover_request
         run_cycle || log "vpn-watch cycle returned non-zero"
-        sleep "$LOOP_SECONDS"
+        case "$(cat "$WAN_STATE_FILE" 2>/dev/null)" in
+            WAN_OFFLINE|WAN_SUSPECT|WAN_UNKNOWN) sleep 10;;
+            *) sleep "$LOOP_SECONDS";;
+        esac
     done
 }
 
