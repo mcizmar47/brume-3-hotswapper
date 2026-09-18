@@ -3,7 +3,7 @@
 **/obj/
 *.user
 *.log
-**/vpn-watch.conf
-**/reboot-guards.tsv
+/tooling/
 TestResults/
 artifacts/
+AGENTS.md

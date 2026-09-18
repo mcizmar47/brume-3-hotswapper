@@ -1,5 +1,6 @@
 #!/bin/sh
 
+CONFIG_FILE="/root/hotswapper/housekeeping.conf"
 GUARD_FILE="/root/hotswapper/reboot-guards.tsv"
 STATE_FILE="/root/hotswapper/state/housekeeping-last-date"
 TAG="hotswapper-housekeeping"
@@ -21,6 +22,33 @@ case "$MODE" in
         exit 2
         ;;
 esac
+
+# Configuration is data: do not execute shell expressions from the file.
+within_reboot_window() {
+    local window start end hour
+    [ -r "$CONFIG_FILE" ] || return 2
+    window="$(awk -F= '
+        /^[[:space:]]*(#|$)/ {next}
+        $1 == "REBOOT_WINDOW_START" && $2 ~ /^[0-9]+$/ && NF == 2 {start=$2+0; ns++; next}
+        $1 == "REBOOT_WINDOW_END" && $2 ~ /^[0-9]+$/ && NF == 2 {end=$2+0; ne++; next}
+        {bad=1}
+        END {if(bad || ns!=1 || ne!=1 || start>23 || end>23 || start>end) exit 1; print start, end}
+    ' "$CONFIG_FILE")" || return 2
+    start="${window% *}"; end="${window#* }"
+    hour="$(date +%H)" || return 2
+    hour="${hour#0}"
+    case "$hour" in ''|*[!0-9]*) return 2;; esac
+    [ "$hour" -ge "$start" ] && [ "$hour" -le "$end" ]
+}
+
+if [ "$MODE" != "--force" ]; then
+    within_reboot_window
+    case "$?" in
+        0) ;;
+        1) exit 0;;
+        *) logger -t "$TAG" "Invalid housekeeping window; postponing."; exit 1;;
+    esac
+fi
 
 if [ "$MODE" != "--force" ]; then
     # Already rebooted today.

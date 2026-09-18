@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <EmbeddedResource Remove="tests/**" />
+    <Page Remove="tests/**" />
+    <None Remove="tests/**" />
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
+    <Content Include="../hotswapper-main.sh;../hotswapper-supervisor.sh;../hotswapper-housekeeping.sh;../firmware/install-gl-guard.sh">
+      <Link>RouterAssets/%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
