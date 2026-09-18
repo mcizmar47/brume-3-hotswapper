@@ -19,7 +19,7 @@ public sealed class WizardViewModel : Observable, IDisposable
     private CancellationTokenSource? operation;
     private readonly DiagnosticLog log = new();
     private int page;
-    private bool busy, demo, acknowledged, unknownAccepted, locationAccepted, notifications, maintenance;
+    private bool busy, demo, acknowledged, notifications, maintenance;
     private string status = "Ready", manualAddress = "", review = "", ntfyUrl = "";
     private RouterIdentity? router;
     private VpnProfile? selectedProfile;
@@ -48,8 +48,6 @@ public sealed class WizardViewModel : Observable, IDisposable
     public bool Demo { get => demo; set { if (Set(ref demo, value)) { session?.Dispose(); session = null; ResetConnection(); Changed(nameof(ModeLabel)); } } }
     public string ModeLabel => Demo ? "DEMO · no network or router changes" : "";
     public bool Acknowledged { get => acknowledged; set { Set(ref acknowledged, value); Refresh(); } }
-    public bool UnknownAccepted { get => unknownAccepted; set { Set(ref unknownAccepted, value); Refresh(); } }
-    public bool LocationAccepted { get => locationAccepted; set { Set(ref locationAccepted, value); Refresh(); } }
     public bool Notifications { get => notifications; set { Set(ref notifications, value); Refresh(); } }
     private int rebootWindowStart = 3, rebootWindowEnd = 14;
     public string[] Hours { get; } = Enumerable.Range(0, 24).Select(h => $"{h:00}:00").ToArray();
@@ -72,7 +70,7 @@ public sealed class WizardViewModel : Observable, IDisposable
             Compatibility.KnownIncompatible => "This GL VPN implementation is known to be incompatible. Installation cannot continue.",
             _ => "The GL VPN reconciliation implementation is unknown. Installation is blocked until its compatibility is established."
         });
-    public VpnProfile? SelectedProfile { get => selectedProfile; set { if (Set(ref selectedProfile, value)) { foreach (var t in Tiers) t.Locations.Clear(); if (value != null) foreach (var g in new ExactLocationResolver().Group(value.Connections)) Tiers[0].Locations.Add(g); LocationAccepted = false; Refresh(); } } }
+    public VpnProfile? SelectedProfile { get => selectedProfile; set { if (Set(ref selectedProfile, value)) { foreach (var t in Tiers) t.Locations.Clear(); if (value != null) foreach (var g in new ExactLocationResolver().Group(value.Connections)) Tiers[0].Locations.Add(g); Refresh(); } } }
     public ObservableCollection<VpnProfile> Profiles { get; } = [];
     public ObservableCollection<TierColumn> Tiers { get; } = [new("Unassigned", 0), new("Tier 1 · preferred", 1), new("Tier 2 · fallback", 2), new("Tier 3 · last resort", 3)];
     public ObservableCollection<LanClient> Clients { get; } = [];
@@ -105,7 +103,7 @@ public sealed class WizardViewModel : Observable, IDisposable
         });
     }
     private void ResetConnection()
-    { Router = null; Profiles.Clear(); SelectedProfile = null; Clients.Clear(); UnknownAccepted = false; installed = false; }
+    { Router = null; Profiles.Clear(); SelectedProfile = null; Clients.Clear(); installed = false; }
     private bool CanNext() => !Busy && Page switch
     {
         0 => Acknowledged, 1 => false, 2 => Router?.IsBrume == true,

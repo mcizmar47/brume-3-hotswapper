@@ -193,44 +193,6 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
         try { using var stream = new MemoryStream(copy); await client.UploadFileAsync(stream, path, ct); }
         finally { Array.Clear(copy); }
     }
-    // Fixed-path raw SSH read. Do not access Result: decoding text could alter firmware bytes.
-    public async Task<byte[]> ReadFirmwareBytesAsync(CancellationToken ct)
-    {
-        RequireBrume();
-        if (ssh?.IsConnected != true) throw new SafeFailure("Reconnect before reading firmware.");
-        using var command = ssh.CreateCommand("cat /usr/bin/rtp2.sh");
-        command.CommandTimeout = TimeSpan.FromSeconds(12);
-        await command.ExecuteAsync(ct);
-        if (command.ExitStatus != 0) throw new SafeFailure($"Read-only firmware retrieval failed (exit status {command.ExitStatus}); output withheld.");
-        return await FirmwareRead.CopyBoundedAsync(command.OutputStream, ct);
-    }
-    // Diagnose the old path separately. No upload, remote temporary file or raw exception reporting.
-    public async Task<string> ProbeFirmwareSftpAsync(CancellationToken ct)
-    {
-        RequireBrume();
-        if (ssh?.IsConnected != true || identity == null) throw new SafeFailure("Reconnect before the SFTP probe.");
-        string stage = "connect/subsystem initialization";
-        using var sftp = new SftpClient(ssh.ConnectionInfo);
-        sftp.HostKeyReceived += (_, e) =>
-        {
-            var key = "SHA256:" + Convert.ToBase64String(SHA256.HashData(e.HostKey)).TrimEnd('=');
-            e.CanTrust = trusted.TryGetValue(identity.Address, out var accepted) && key == accepted;
-        };
-        try
-        {
-            await sftp.ConnectAsync(ct);
-            stage = "file attributes";
-            var attributes = sftp.GetAttributes("/usr/bin/rtp2.sh");
-            if (attributes.Size > FirmwareRead.MaximumBytes) return "File exceeds probe limit.";
-            stage = "file read";
-            using var stream = sftp.OpenRead("/usr/bin/rtp2.sh");
-            var bytes = await FirmwareRead.CopyBoundedAsync(stream, ct);
-            Array.Clear(bytes);
-            return "SFTP connect, attributes and read succeeded; no upload attempted.";
-        }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception e) { return "SFTP failed during " + stage + ": " + FirmwareRead.FailureCategory(e); }
-    }
     private void RequireBrume() { if (identity?.IsBrume != true) throw new SafeFailure("Device verification must identify a GL-MT5000 before continuing."); }
     public void Dispose() { ssh?.Dispose(); ssh = null; identity = null; reviewedPlan = null; upload = null; }
 }

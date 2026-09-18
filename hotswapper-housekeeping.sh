@@ -146,8 +146,10 @@ if [ -x "$HOTSWAPPER" ]; then
     fi
 fi
 
-echo "$TODAY" > "$STATE_FILE"
-sync
+if ! printf '%s\n' "$TODAY" > "$STATE_FILE" || ! sync; then
+    logger -t "$TAG" "Could not persist daily reboot marker; postponing."
+    exit 1
+fi
 
 if [ "$MODE" = "--force" ]; then
     logger -t "$TAG" "FORCE mode: pre-reboot VPN handling finished; rebooting router."

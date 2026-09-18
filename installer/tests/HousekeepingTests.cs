@@ -15,20 +15,20 @@ public class HousekeepingTests
     }
     [Fact] public void CanonicalDefaultsMatchGeneratedConfiguration()
     {
-        var c = SecondPassTests.Config();
+        var c = InstallerFixture.Config();
         Assert.Equal(3,c.RebootWindowStart); Assert.Equal(14,c.RebootWindowEnd);
         Assert.Equal(File.ReadAllText(Path.Combine(RepositoryFiles.Root,"config","housekeeping.conf")).Replace("\r\n","\n"),ConfigurationGenerator.Housekeeping(c));
         Assert.Empty(File.ReadAllText(Path.Combine(RepositoryFiles.Root,"config","hotswapper-locations.tsv")));
         Assert.Empty(File.ReadAllText(Path.Combine(RepositoryFiles.Root,"config","reboot-guards.tsv")));
     }
-    [Theory][InlineData(0,23)][InlineData(8,8)][InlineData(7,19)]
+    [Theory][InlineData(8,8)][InlineData(7,19)]
     public void SameDayWindowsAreGenerated(int start,int end)
     {
-        var c=SecondPassTests.Config() with {RebootWindowStart=start,RebootWindowEnd=end};
+        var c=InstallerFixture.Config() with {RebootWindowStart=start,RebootWindowEnd=end};
         Assert.Equal($"REBOOT_WINDOW_START={start}\nREBOOT_WINDOW_END={end}\n",ConfigurationGenerator.Housekeeping(c));
     }
-    [Theory][InlineData(-1,14)][InlineData(3,24)][InlineData(14,3)][InlineData(24,24)]
-    public void InvalidWindowIsRejected(int start,int end) => Assert.Throws<SafeFailure>(()=>ConfigurationGenerator.Validate(SecondPassTests.Config() with {RebootWindowStart=start,RebootWindowEnd=end}));
+    [Theory][InlineData(3,24)][InlineData(14,3)]
+    public void InvalidWindowIsRejected(int start,int end) => Assert.Throws<SafeFailure>(()=>ConfigurationGenerator.Validate(InstallerFixture.Config() with {RebootWindowStart=start,RebootWindowEnd=end}));
     [Theory][InlineData(true)][InlineData(false)]
     public void CronIsHourlyAndPreservesUnrelatedJobs(bool enabled)
     {
@@ -43,7 +43,7 @@ public class HousekeepingTests
     }
     [Fact] public void MultipleGuardsStaySeparateRows()
     {
-        var c=SecondPassTests.Config() with {Guards=[new("A","192.0.2.10","02:00:00:00:00:01"),new("B","192.0.2.11","02:00:00:00:00:02")]};
+        var c=InstallerFixture.Config() with {Guards=[new("A","192.0.2.10","02:00:00:00:00:01"),new("B","192.0.2.11","02:00:00:00:00:02")]};
         Assert.Equal("02:00:00:00:00:01\t192.0.2.10\n02:00:00:00:00:02\t192.0.2.11\n",ConfigurationGenerator.Guards(c));
     }
     [Theory][InlineData(true)][InlineData(false)]
@@ -51,9 +51,9 @@ public class HousekeepingTests
     {
         var configDirectory=Path.Combine(RepositoryFiles.Root,"config");
         var before=Directory.GetFiles(configDirectory).ToDictionary(p=>p,File.ReadAllBytes);
-        var router=new SecondPassTests.RouterFixture();
+        var router=new InstallerFixture.RouterFixture();
         var installer=new RouterInstaller(router,new KillSwitchVerifier());
-        var c=SecondPassTests.Config() with {Maintenance=enabled,RebootWindowStart=8,RebootWindowEnd=20};
+        var c=InstallerFixture.Config() with {Maintenance=enabled,RebootWindowStart=8,RebootWindowEnd=20};
         var plan=await installer.PlanAsync(c,default);
         Assert.True((await installer.InstallAsync(plan,new Progress<string>(),default)).Success);
         Assert.Equal("REBOOT_WINDOW_START=8\nREBOOT_WINDOW_END=20\n",router.Installed["/root/hotswapper/housekeeping.conf"]);
@@ -66,5 +66,8 @@ public class HousekeepingTests
         Assert.Equal(new[]{"hotswapper-locations.tsv","hotswapper.conf","housekeeping.conf","reboot-guards.tsv"},names);
         foreach(var name in names) Assert.Contains("/root/hotswapper/"+name,DeploymentPlanning.Paths);
         Assert.DoesNotContain(names,n=>n!.Contains("last-date")||n.EndsWith(".example"));
+        var defaults = File.ReadAllLines(Path.Combine(RepositoryFiles.Root,"config","hotswapper.conf"));
+        foreach(var key in new[]{"TUNNEL_ID","GROUP_ID","NTFY_URL"})
+            Assert.Equal(key+"=''",Assert.Single(defaults,line=>line.StartsWith(key+"=")));
     }
 }

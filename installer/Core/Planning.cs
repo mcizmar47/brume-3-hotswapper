@@ -113,7 +113,7 @@ public static class InstallationPlanner
     public static IReadOnlyList<InstallationStep> Create(InstallerConfiguration c)
     {
         ConfigurationGenerator.Validate(c);
-        var names = new List<string> { "Preflight prerequisites", "Revalidate identity and compatibility", "Back up affected files",
+        var names = new List<string> { "Router prerequisites", "Revalidate identity and compatibility", "Back up affected files",
             "Upload Hotswapper, supervisor and housekeeping", "Install private configuration and location pools" };
         if (c.Maintenance && c.Guards.Count > 0) names.Add("Validate and reserve reboot guard addresses");
         names.AddRange(["Apply structural GL reconciliation guard", "Update owned cron entries", "Restart supervisor", "Validate runtime and kill switch"]);
