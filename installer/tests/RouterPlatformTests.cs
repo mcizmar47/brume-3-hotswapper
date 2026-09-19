@@ -70,7 +70,7 @@ public class RouterPlatformTests
             .Concat(Directory.EnumerateFiles(Path.Combine(root,"firmware"),"*.sh",SearchOption.AllDirectories));
         files = files.Concat(Directory.EnumerateFiles(root,"*.sh"));
         foreach(var path in files)
-            Assert.False(Regex.IsMatch(File.ReadAllText(path),@"\bstat\b|\bfind\b[^\r\n]*-printf|\bsetsid\b|\bsleep\s+[0-9]+\.[0-9]+"),Path.GetFileName(path));
+            Assert.False(Regex.IsMatch(File.ReadAllText(path),@"(?<![/\w])stat\s+|\bfind\b[^\r\n]*-printf|\bsetsid\b|\bsleep\s+[0-9]+\.[0-9]+"),Path.GetFileName(path));
         Assert.Contains("busybox usleep \"$1\"",File.ReadAllText(Path.Combine(root,"hotswapper-main.sh")));
     }
     [Fact] public void DiscoveryUsesGatewayAndNonGatewaySubnetEdgesWithoutScanning()

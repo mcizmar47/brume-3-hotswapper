@@ -18,8 +18,12 @@ public static class RouterPrerequisites
         var hash=(await router.ExecuteAsync("sha256sum /usr/bin/rtp2.sh | awk '{print $1}'",ct)).Trim();
         if (hash != identity.Rtp2Hash || CompatibilityCatalog.Classify(hash) is Compatibility.Unknown or Compatibility.KnownIncompatible)
             throw new SafeFailure("Firmware changed or its compatibility is not established.");
-        var marker=(await router.ExecuteAsync("grep -Fc '# hotswapper GL reconciliation guard v1' /usr/bin/rtp2.sh || true",ct)).Trim();
-        if (marker != (CompatibilityCatalog.IsPatched(hash)?"1":"0")) throw new SafeFailure("Firmware guard marker differs from the verified catalog state.");
-        await router.ExecuteAsync("test \"$(grep -Fxc 'cmd=\"$1\";shift' /usr/bin/rtp2.sh)\" = 1 && sh -n /usr/bin/rtp2.sh",ct);
+        foreach (var target in FirmwareTargets.All)
+        {
+            var actual = (await router.ExecuteAsync($"sha256sum {target.Path} | awk '{{print $1}}'", ct)).Trim();
+            if (!target.Supports(actual)) throw new SafeFailure("Unsupported GL coordination target: " + target.Path);
+        }
+        await router.ExecuteAsync("busybox --list | grep -Fxq flock", ct);
+        await router.ExecuteAsync("command -v iptables-restore >/dev/null && command -v lua >/dev/null", ct);
     }
 }

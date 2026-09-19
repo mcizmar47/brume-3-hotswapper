@@ -9,7 +9,7 @@ public class DeploymentTests
         var fake=new RouterFixture(); var installer=new RouterInstaller(fake,new KillSwitchVerifier());
         var plan=await installer.PlanAsync(Config(),CancellationToken.None);
         var result=await installer.InstallAsync(plan,new Progress<string>(),CancellationToken.None);
-        Assert.True(result.Success); Assert.Equal(8, fake.Installed.Count); Assert.True(fake.Running);
+        Assert.True(result.Success); Assert.Equal(11, fake.Installed.Count); Assert.True(fake.Running);
         Assert.Equal(CronPlanner.Supervisor+"\n",fake.Cron); Assert.Equal(1,fake.RealPatches);
     }
     [Fact] public async Task GuardFailureRollsBackOnlyOwnedFiles()
@@ -36,7 +36,7 @@ public class DeploymentTests
         var inner=new InstallerFixture.RouterFixture();var installer=new RouterInstaller(inner,new KillSwitchVerifier());
         var plan=await installer.PlanAsync(InstallerFixture.Config(),default);
         // A prior attempt applied the recognized guard, but the UI still carries the stock hash.
-        inner.FirmwareHash=CompatibilityCatalog.PatchedHash;
+        inner.MarkFirmwarePatched();
         Assert.True((await installer.InstallAsync(plan,new Progress<string>(),default)).Success);
         Assert.Equal(0,inner.RealPatches);
         Assert.Equal(CompatibilityCatalog.PatchedHash,inner.FirmwareHash);
@@ -88,7 +88,7 @@ public class DeploymentTests
         Assert.True(plan.Snapshot.WatchdogRunning);
         Assert.True((await installer.InstallAsync(plan,new Progress<string>(),default)).Success);
         Assert.Contains("previous current-layout script",fake.Backups.Values);
-        Assert.Equal(8, fake.Installed.Count);
+        Assert.Equal(11, fake.Installed.Count);
         Assert.Contains("user-job",fake.Cron);
         Assert.Equal(1,fake.Cron.Split('\n').Count(l=>l==CronPlanner.Supervisor));
         Assert.Equal(maintenance?1:0,fake.Cron.Split('\n').Count(l=>l==CronPlanner.Maintenance));

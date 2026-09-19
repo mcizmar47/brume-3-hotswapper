@@ -19,6 +19,12 @@ internal static class InstallerFixture
         public Dictionary<string,string> Uploads {get;}=[];
         public Dictionary<string,string> Installed {get;}=[];
         public string FirmwareHash=CompatibilityCatalog.StockHash;
+        public Dictionary<string,string> FirmwareHashes = FirmwareTargets.All.Where(t => t.Id != "rtp").ToDictionary(t => t.Path,t => t.StockHash);
+        private string FirmwareAt(string path) => path == "/usr/bin/rtp2.sh" ? FirmwareHash : FirmwareHashes[path];
+        public void MarkFirmwarePatched() {
+            FirmwareHash=CompatibilityCatalog.PatchedHash;
+            foreach (var t in FirmwareTargets.All.Where(t => t.Id != "rtp")) FirmwareHashes[t.Path]=t.PatchedHash;
+        }
         public Dictionary<string,string> Backups {get;}=[];
         public string Cron="";
         public bool Running,RejectPatch;
@@ -32,17 +38,22 @@ internal static class InstallerFixture
             string result="";
             var metadata = DeploymentPlanning.Paths.SelectMany(p => FileMetadata.Commands(p).Select(f => (Path:p, Field:f.Key, Command:f.Value))).FirstOrDefault(f => f.Command == cmd);
             if (metadata.Command != null) {
-                bool exists = metadata.Path == "/usr/bin/rtp2.sh" || Installed.ContainsKey(metadata.Path);
+                bool exists = FirmwareTargets.Find(metadata.Path) != null || Installed.ContainsKey(metadata.Path);
                 result = metadata.Field switch {
                     "symlink" => "0", "exists" => exists ? "1" : "0", "regular" or "readable" => "1",
-                    "listing" => (metadata.Path == "/usr/bin/rtp2.sh" ? "-rwxr-xr-x" : metadata.Path.EndsWith(".sh") ? "-rwx------" : "-rw-------") + " 1 0 0 123 Jan 1 00:00 " + metadata.Path,
-                    "size" => "123", "sha256" => metadata.Path == "/usr/bin/rtp2.sh" ? FirmwareHash : Hash(Installed[metadata.Path]), _ => ""
+                    "listing" => (FirmwareTargets.Find(metadata.Path) != null ? "-rwxr-xr-x" : metadata.Path.EndsWith(".sh") ? "-rwx------" : "-rw-------") + " 1 0 0 123 Jan 1 00:00 " + metadata.Path,
+                    "size" => "123", "sha256" => FirmwareTargets.Find(metadata.Path) != null ? FirmwareAt(metadata.Path) : Hash(Installed[metadata.Path]), _ => ""
                 };
             }
             else if(cmd=="ubus call system board") result="{\"model\":\"GL.iNet GL-MT5000\",\"board_name\":\"glinet,gl-mt5000\"}";
-            else if(cmd.StartsWith("sha256sum /usr/bin/rtp2.sh")) result=FirmwareHash;
+            else if (FirmwareTargets.All.FirstOrDefault(t => cmd == $"sha256sum {t.Path} | awk '{{print $1}}'") is { } firmware) result=FirmwareAt(firmware.Path);
             else if(cmd.StartsWith("sha256sum /root/hotswapper/installer/run/rtp2.preview")) result=CompatibilityCatalog.PatchedHash;
             else if(cmd is "uci -q get route_policy.vpn.killswitch || true" or "uci -q get route_policy.vpn.enabled || true") result="1";
+            else if(cmd=="uci -q get route_policy.vpn.via_type || true") result="wireguard";
+            else if(cmd=="uci -q get route_policy.global.instance_on || true") result="1";
+            else if(cmd=="uci -q get route_policy.gl_process_vpn || true") result="rule_process";
+            else if(cmd=="uci -q get route_policy.gl_process_vpn.via || true") result="wgclient1";
+            else if(cmd=="uci -q get route_policy.gl_process_vpn.group_id || true") result="";
             else if(cmd=="uci -q get glipv6.globals.enabled || true") result="0";
             else if(cmd=="uci -q get route_policy.vpn.mark") result="0x1000";
             else if(cmd=="iptables -w -t mangle -S TUNNEL42_ROUTE_POLICY") result="-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j MARK --set-xmark 0x1000/0xf000\n-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j DROP";
@@ -72,6 +83,7 @@ internal static class InstallerFixture
                 var match=Regex.Match(cmd,@"cp '/root/hotswapper/installer/backups/([^']+)' '([^']+)\.hotswap-restore'");
                 if(match.Success) {
                     if(match.Groups[2].Value=="/usr/bin/rtp2.sh") FirmwareHash=match.Groups[1].Value;
+                    else if(FirmwareTargets.Find(match.Groups[2].Value) != null) FirmwareHashes[match.Groups[2].Value]=match.Groups[1].Value;
                     else Installed[match.Groups[2].Value]=Backups[match.Groups[1].Value];
                 }
             }
@@ -81,7 +93,7 @@ internal static class InstallerFixture
                 Installed[match.Groups[2].Value]=Uploads[match.Groups[1].Value];
             }
             else if(cmd=="/root/hotswapper/install-gl-guard.sh --install")
-            { if(RejectPatch)throw new System.IO.IOException("synthetic-private-router-output"); FirmwareHash=CompatibilityCatalog.PatchedHash;RealPatches++; }
+            { if(RejectPatch)throw new System.IO.IOException("synthetic-private-router-output"); MarkFirmwarePatched();RealPatches++; }
             else if(cmd.Contains("/root/hotswapper-supervisor.sh --installer")) Running=true;
             else if(cmd.Contains("kill -TERM ")) Running=false;
             else if(cmd=="/root/hotswapper-main.sh status") result="CURRENT: wgclient1 peer=11 tier=1\nDOWNTIER: none\nUPTIER: none\n";
@@ -90,11 +102,11 @@ internal static class InstallerFixture
             else if(cmd.StartsWith("if [ -f '"))
             {
                 var path=Regex.Match(cmd,@"if \[ -f '([^']+)'").Groups[1].Value;
-                result=path=="/usr/bin/rtp2.sh"?FirmwareHash:Installed.TryGetValue(path,out var value)?Hash(value):"";
+                result=FirmwareTargets.Find(path)!=null?FirmwareAt(path):Installed.TryGetValue(path,out var value)?Hash(value):"";
             }
             else if(cmd.StartsWith("rm -f '"))
                 Installed.Remove(Regex.Match(cmd,@"rm -f '([^']+)'").Groups[1].Value);
-            else if (!new[] { "test ", "set -e; test ", "sh -n ", "sh /root/hotswapper/installer/run/", "cp /usr/bin/rtp2.sh ",
+            else if (!new[] { "/root/hotswapper/gl-coordination.sh owned ", "busybox --list", "command -v iptables-restore", "/root/hotswapper/install-gl-guard.sh --verify", "test ", "set -e; test ", "sh -n ", "sh /root/hotswapper/installer/run/", "cp /usr/bin/rtp2.sh ",
                 "if ip link show wgclient", "grep -Fxq ",
                 "uci -q get network.wgclient2.config", "uci -q get network.wgclient3.config", "uci -q show dhcp",
                 "if [ -r /tmp/dhcp.leases", "ip -4 neigh show", "ip -o -4 addr show", "if uci -q get dhcp.",

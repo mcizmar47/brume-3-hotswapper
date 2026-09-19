@@ -206,6 +206,14 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
             operation = "selected VPN routing and GL enforcement";
             await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
             bool killSwitchEnabled = await KillSwitchVerifier.ReadEnabledAsync(router, c.Profile.PolicySection, ct);
+            if (!killSwitchEnabled) throw new SafeFailure("Enable the selected GL kill switch before installing managed failover.");
+            if ((await router.ExecuteAsync($"uci -q get route_policy.{Identifier(c.Profile.PolicySection)}.via_type || true", ct)).Trim() != "wireguard" ||
+                (await router.ExecuteAsync("uci -q get route_policy.global.instance_on || true", ct)).Trim() != "1")
+                throw new SafeFailure("Managed failover requires a WireGuard route policy with GL per-instance VPN DNS enabled.");
+            if ((await router.ExecuteAsync("uci -q get route_policy.gl_process_vpn || true", ct)).Trim() != "rule_process" ||
+                (await router.ExecuteAsync("uci -q get route_policy.gl_process_vpn.via || true", ct)).Trim() != active ||
+                (await router.ExecuteAsync("uci -q get route_policy.gl_process_vpn.group_id || true", ct)).Trim().Length != 0)
+                throw new SafeFailure("The generated GL VPN process policy must refer to the selected CURRENT slot.");
             operation = "pending DHCP changes";
             await router.ExecuteAsync("test -z \"$(uci changes dhcp)\"", ct);
             operation = "installed file metadata";

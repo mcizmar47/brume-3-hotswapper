@@ -75,7 +75,7 @@ public static class FileMetadata
         return fields;
     }
     public static bool SafeMode(string path,string mode) => Regex.IsMatch(mode,@"\A[0-7]{3,4}\z") &&
-        (Convert.ToInt32(mode,8)&0xE12)==0 && (path!="/usr/bin/rtp2.sh" || Convert.ToInt32(mode,8)==493);
+        (Convert.ToInt32(mode,8)&0xE12)==0 && (FirmwareTargets.Find(path)==null || Convert.ToInt32(mode,8)==493);
     public static IReadOnlyList<MetadataFinding> Assess(string path,IReadOnlyDictionary<string,string> fields)
     {
         string Get(string key)=>fields.GetValueOrDefault(key,"missing");
@@ -83,14 +83,14 @@ public static class FileMetadata
         void Check(string field,bool pass,string detail)=>checks.Add(new(field,pass?"PASS":"BLOCK",detail));
         Check("symlink",Get("symlink")=="0","Expected no symlink.");
         if(Get("exists")=="0") {
-            checks.Add(new("existence",path=="/usr/bin/rtp2.sh"?"BLOCK":"WARN",path is "/root/hotswapper/hotswapper-locations.tsv" or "/root/hotswapper/reboot-guards.tsv"?"Generated file is required after installation.":"Absent."));
+            checks.Add(new("existence",FirmwareTargets.Find(path)!=null?"BLOCK":"WARN",path is "/root/hotswapper/hotswapper-locations.tsv" or "/root/hotswapper/reboot-guards.tsv"?"Generated file is required after installation.":"Absent."));
             return checks;
         }
         Check("exists",Get("exists")=="1","Expected existing file.");
         Check("regular",Get("regular")=="1" && Get("type")=="-","Independent test and listing must identify a regular file.");
         Check("readability",Get("readable")=="1","Expected readable file.");
         foreach(var key in new[]{"uid","gid"}) Check(key,Get(key)=="0",key.ToUpperInvariant()+"="+(uint.TryParse(Get(key),out _)?Get(key):"unavailable")+"; expected 0.");
-        string mode=Get("mode"),expected=path=="/usr/bin/rtp2.sh"?"755":path.EndsWith(".sh")?"700":"600";
+        string mode=Get("mode"),expected=FirmwareTargets.Find(path)!=null?"755":path.EndsWith(".sh")?"700":"600";
         bool safe=SafeMode(path,mode), exact=safe && Convert.ToInt32(mode,8)==Convert.ToInt32(expected,8);
         checks.Add(new("mode",!safe?"BLOCK":exact?"PASS":"WARN","Observed "+(Regex.IsMatch(mode,@"\A[0-7]{3,4}\z")?mode:"unavailable")+"; expected "+expected+(safe&&!exact?"; safe permission normalization during installation.":".")));
         Check("hash",Regex.IsMatch(Get("sha256"),@"\A[a-fA-F0-9]{64}\z"),"SHA-256 format/readability checked; private hashes withheld.");

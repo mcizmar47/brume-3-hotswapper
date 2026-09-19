@@ -36,7 +36,8 @@ public class RuntimeValidationTests
     {
         Assert.Equal(new[] {"/root/hotswapper-main.sh","/root/hotswapper-supervisor.sh","/root/hotswapper-housekeeping.sh",
             "/root/hotswapper/hotswapper.conf","/root/hotswapper/hotswapper-locations.tsv","/root/hotswapper/reboot-guards.tsv",
-            "/root/hotswapper/housekeeping.conf","/root/hotswapper/install-gl-guard.sh","/usr/bin/rtp2.sh"},DeploymentPlanning.Paths);
+            "/root/hotswapper/housekeeping.conf","/root/hotswapper/install-gl-guard.sh","/root/hotswapper/gl-coordination.sh",
+            "/root/hotswapper/gl-patches.awk","/root/hotswapper/gl-targets.tsv"}.Concat(FirmwareTargets.All.Select(t=>t.Path)),DeploymentPlanning.Paths);
         DeploymentUpload.ValidatePath("/root/hotswapper/installer/run-"+new string('a',32)+"/hotswapper-main.sh");
         Assert.Contains("/tmp/hotswapper/lock/pid",HotswapRuntime.PidCommand);
     }

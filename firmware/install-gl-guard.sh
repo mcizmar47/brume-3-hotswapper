@@ -1,122 +1,99 @@
 #!/bin/sh
 set -eu
-
-TARGET="${HOTSWAPPER_RTP2_TARGET:-/usr/bin/rtp2.sh}"
-BACKUP_DIR="/root/hotswapper/firmware-backups"
-MARKER="# hotswapper GL reconciliation guard v1"
-ANCHOR='cmd="$1";shift'
-
-usage() {
-    echo "Usage: $0 [--check|--install|--restore BACKUP]"
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=${HS_FIRMWARE_ROOT:-}
+BACKUPS=${HS_BACKUPS:-/root/hotswapper/firmware-backups}
+CATALOG="$DIR/gl-targets.tsv"
+WORK="${HS_PATCH_WORK:-/tmp}/hotswapper-patch.$$"
+OLD_RTP=5c4b26eebdd3cdb6876b7b5e9f48901d8061b525837c1d879f0d059d856f150c
+hash() { sha256sum "$1" | awk '{print $1}'; }
+syntax() {
+    case "$1" in
+        *.lua) HS_LUA_FILE="$1" lua -e 'assert(loadfile(os.getenv("HS_LUA_FILE")))';;
+        *) sh -n "$1";;
+    esac
 }
-
-count_anchor() {
-    grep -Fxc "$ANCHOR" "$TARGET" 2>/dev/null || true
+check() {
+    local id path stock patched actual
+    while IFS="$(printf '\t')" read -r id path stock patched; do
+        [ -f "$ROOT$path" ] && [ ! -L "$ROOT$path" ] || return 1
+        actual=$(hash "$ROOT$path")
+        [ "$actual" = "$patched" ] && continue
+        [ "${1:-}" != installed ] || return 1
+        [ "$actual" = "$stock" ] || { [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ]; } || return 1
+    done < "$CATALOG"
 }
-
-check_target() {
-    [ -f "$TARGET" ] || { echo "ERROR: $TARGET not found" >&2; return 1; }
-    if grep -Fq "$MARKER" "$TARGET"; then
-        echo "PATCHED: $TARGET already contains hotswapper guard v1"
-        return 0
+cleanup() {
+    local status=$? id path actual patched
+    trap - EXIT
+    if [ -f "$WORK/changes" ]; then
+        while IFS="$(printf '\t')" read -r id path actual patched; do
+            rm -f "$ROOT$path.hotswap-new-$$"
+            [ "$status" = 0 ] && continue
+            # Restore only bytes written by this attempt; never overwrite an outsider.
+            [ ! -L "$ROOT$path" ] && [ "$(hash "$ROOT$path")" = "$patched" ] || continue
+            [ "$(hash "$BACKUPS/$actual")" = "$actual" ] || continue
+            [ ! -e "$ROOT$path.hotswap-restore-$$" ] && [ ! -L "$ROOT$path.hotswap-restore-$$" ] || continue
+            cp -p "$BACKUPS/$actual" "$ROOT$path.hotswap-restore-$$" &&
+                mv -f "$ROOT$path.hotswap-restore-$$" "$ROOT$path"
+        done < "$WORK/changes"
     fi
-    c="$(count_anchor)"
-    [ "$c" = "1" ] || {
-        echo "MISMATCH: expected exactly one anchor: $ANCHOR" >&2
-        echo "Found: $c" >&2
-        return 1
-    }
-    echo "MATCH: current firmware contains the expected unique insertion anchor"
-    sha256sum "$TARGET" 2>/dev/null || true
+    rm -rf "$WORK"
+    exit "$status"
 }
-
-install_patch() {
-    check_target
-    if grep -Fq "$MARKER" "$TARGET"; then
-        exit 0
+install() {
+    local id path stock patched actual input output
+    check || { echo 'Unsupported GL coordination target; nothing changed.' >&2; return 1; }
+    check installed && return 0
+    if [ -z "$ROOT" ]; then
+        . "$DIR/gl-coordination.sh"
+        hs_daemon_alive && { echo 'Stop Hotswapper before changing firmware.' >&2; return 1; }
+        hs_lock || return 1
     fi
-
-    mkdir -p "$BACKUP_DIR"
-    hash="$(sha256sum "$TARGET" | awk '{print $1}')"
-    backup="$BACKUP_DIR/rtp2.sh.$hash"
-    [ -f "$backup" ] || cp -p "$TARGET" "$backup"
-    echo "Backup: $backup"
-
-    tmp="/tmp/rtp2.sh.hotswapper.$$"
-    awk -v anchor="$ANCHOR" '
-        BEGIN { inserted=0 }
-        {
-            print
-            if ($0 == anchor) {
-                print ""
-                print "# hotswapper GL reconciliation guard v1"
-                print "# During hotswapper fast promotion, defer rtp2 reconciliation so GL cannot"
-                print "# rebuild route-policy/firewall state underneath the transaction."
-                print "HOTSWAPPER_GUARD_DIR=\"/tmp/hotswapper\""
-                print "HOTSWAPPER_GUARD_FLAG=\"${HOTSWAPPER_GUARD_DIR}/promotion-in-progress\""
-                print "HOTSWAPPER_GUARD_PENDING=\"${HOTSWAPPER_GUARD_DIR}/gl-reconcile-pending\""
-                print "hotswapper_guard_active() {"
-                print "    [ -f \"$HOTSWAPPER_GUARD_FLAG\" ] || return 1"
-                print "    guard_pid=\"$(sed -n '\''s/^pid=//p'\'' \"$HOTSWAPPER_GUARD_FLAG\" 2>/dev/null | head -n1)\""
-                print "    guard_started=\"$(sed -n '\''s/^started=//p'\'' \"$HOTSWAPPER_GUARD_FLAG\" 2>/dev/null | head -n1)\""
-                print "    guard_now=\"$(date +%s)\""
-                print "    echo \"$guard_pid\" | grep -Eq '\''^[0-9]+$'\'' || { rm -f \"$HOTSWAPPER_GUARD_FLAG\"; return 1; }"
-                print "    echo \"$guard_started\" | grep -Eq '\''^[0-9]+$'\'' || { rm -f \"$HOTSWAPPER_GUARD_FLAG\"; return 1; }"
-                print "    echo \"$guard_now\" | grep -Eq '\''^[0-9]+$'\'' || { rm -f \"$HOTSWAPPER_GUARD_FLAG\"; return 1; }"
-                print "    guard_age=$((guard_now - guard_started))"
-                print "    if [ \"$guard_age\" -ge 0 ] 2>/dev/null && [ \"$guard_age\" -le 5 ] 2>/dev/null && kill -0 \"$guard_pid\" 2>/dev/null; then"
-                print "        return 0"
-                print "    fi"
-                print "    rm -f \"$HOTSWAPPER_GUARD_FLAG\""
-                print "    return 1"
-                print "}"
-                print "if hotswapper_guard_active; then"
-                print "    mkdir -p \"$HOTSWAPPER_GUARD_DIR\""
-                print "    printf '\''%s pid=%s cmd=%s args=%s\\n'\'' \"$(date +%s)\" \"$$\" \"$cmd\" \"$*\" >> \"$HOTSWAPPER_GUARD_PENDING\""
-                print "    logger -t hotswapper \"Deferred GL rtp2 reconciliation during fast promotion: cmd=$cmd\" 2>/dev/null || true"
-                print "    exit 0"
-                print "fi"
-                inserted=1
-            }
-        }
-        END { if (inserted != 1) exit 42 }
-    ' "$TARGET" > "$tmp" || {
-        rc=$?
-        rm -f "$tmp"
-        echo "ERROR: patch generation failed ($rc); firmware untouched" >&2
-        exit 1
-    }
-
-    chmod --reference="$TARGET" "$tmp" 2>/dev/null || chmod 755 "$tmp"
-    chown --reference="$TARGET" "$tmp" 2>/dev/null || true
-
-    # Structural verification before touching firmware-owned file.
-    grep -Fq "$MARKER" "$tmp" || { rm -f "$tmp"; echo "ERROR: marker missing from generated patch" >&2; exit 1; }
-    [ "$(grep -Fc "$MARKER" "$tmp")" = "1" ] || { rm -f "$tmp"; echo "ERROR: marker not unique" >&2; exit 1; }
-    sh -n "$tmp" || { rm -f "$tmp"; echo "ERROR: patched shell syntax invalid" >&2; exit 1; }
-
-    cp "$tmp" "$TARGET"
-    rm -f "$tmp"
-    sync
-
-    echo "INSTALLED: hotswapper GL reconciliation guard v1"
-    sha256sum "$TARGET" 2>/dev/null || true
-    echo "Re-run '$0 --check' after any firmware update before reinstalling."
+    umask 077
+    mkdir "$WORK"
+    trap cleanup EXIT
+    [ ! -L "$BACKUPS" ] || return 1
+    mkdir -p "$BACKUPS"
+    # Validate every output before replacing the first target.
+    while IFS="$(printf '\t')" read -r id path stock patched; do
+        actual=$(hash "$ROOT$path")
+        [ "$actual" != "$patched" ] || continue
+        input="$ROOT$path"
+        if [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ]; then
+            input="$WORK/rtp.stock"
+            awk '
+                $0 == "cmd=\"$1\";shift" {print; after=1; next}
+                after && $0 == "" {next}
+                after && $0 == "# hotswapper GL reconciliation guard v1" {skip=1; after=0; next}
+                skip {if ($0 == "fi") skip=0; next}
+                {after=0; print}
+            ' "$ROOT$path" > "$input"
+            [ "$(hash "$input")" = "$stock" ] || return 1
+        fi
+        output="$WORK/$id"
+        awk -v target="$id" -f "$DIR/gl-patches.awk" "$input" > "$output"
+        [ "$(hash "$output")" = "$patched" ] || return 1
+        case "$path" in *.lua) cp "$output" "$output.lua"; syntax "$output.lua";; *) syntax "$output";; esac
+        [ ! -L "$BACKUPS/$actual" ] || return 1
+        [ -f "$BACKUPS/$actual" ] || cp -p "$ROOT$path" "$BACKUPS/$actual"
+        [ "$(hash "$BACKUPS/$actual")" = "$actual" ] || return 1
+        printf '%s\t%s\t%s\t%s\n' "$id" "$path" "$actual" "$patched" >> "$WORK/changes"
+    done < "$CATALOG"
+    [ -f "$WORK/changes" ] || return 0
+    while IFS="$(printf '\t')" read -r id path actual patched; do
+        [ ! -L "$ROOT$path" ] && [ "$(hash "$ROOT$path")" = "$actual" ] || return 1
+        # Keep replacement on the target filesystem and preserve its permissions.
+        [ ! -e "$ROOT$path.hotswap-new-$$" ] && [ ! -L "$ROOT$path.hotswap-new-$$" ] || return 1
+        cp -p "$ROOT$path" "$ROOT$path.hotswap-new-$$"
+        cat "$WORK/$id" > "$ROOT$path.hotswap-new-$$"
+        mv -f "$ROOT$path.hotswap-new-$$" "$ROOT$path"
+        [ "$(hash "$ROOT$path")" = "$patched" ] || return 1
+    done < "$WORK/changes"
 }
-
-restore_backup() {
-    backup="${1:-}"
-    [ -n "$backup" ] || { echo "ERROR: provide backup path" >&2; exit 2; }
-    [ -f "$backup" ] || { echo "ERROR: backup not found: $backup" >&2; exit 1; }
-    sh -n "$backup" || { echo "ERROR: backup fails shell syntax check" >&2; exit 1; }
-    cp "$backup" "$TARGET"
-    sync
-    echo "RESTORED: $TARGET from $backup"
-}
-
 case "${1:---check}" in
-    --check) check_target ;;
-    --install) install_patch ;;
-    --restore) shift; restore_backup "${1:-}" ;;
-    *) usage; exit 2 ;;
+    --check) check;;
+    --verify) check installed;;
+    --install) install;;
+    *) echo 'Usage: install-gl-guard.sh [--check|--verify|--install]' >&2; exit 2;;
 esac

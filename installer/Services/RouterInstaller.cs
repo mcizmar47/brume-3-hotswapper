@@ -19,7 +19,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
     public async Task<InstallationResult> InstallAsync(InstallationPlan plan, IProgress<string> progress, CancellationToken ct)
     {
         var c = plan.Configuration;
-        progress.Report("Validating router, VPN ownership and kill switch…");
+        progress.Report("Validating router, VPN ownership and kill switchâ€¦");
         var fresh = await inspection.InspectAsync(c, ct);
         c = c with { Router = fresh.Router };
         plan = DeploymentPlanning.Create(c, fresh);
@@ -32,13 +32,12 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             ["/root/hotswapper/reboot-guards.tsv"] = ConfigurationGenerator.Guards(c),
             ["/root/hotswapper/housekeeping.conf"] = ConfigurationGenerator.Housekeeping(c)
         };
-        foreach (var name in new[] {"hotswapper-main.sh","hotswapper-supervisor.sh","hotswapper-housekeeping.sh","install-gl-guard.sh"})
-            content[(name == "install-gl-guard.sh" ? "/root/hotswapper/" : "/root/") + name] = (await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "RouterAssets", name), ct)).Replace("\r\n", "\n");
+        foreach (var name in new[] {"hotswapper-main.sh","hotswapper-supervisor.sh","hotswapper-housekeeping.sh","install-gl-guard.sh","gl-coordination.sh","gl-patches.awk","gl-targets.tsv"})
+            content[(name.StartsWith("hotswapper-") ? "/root/" : "/root/hotswapper/") + name] = (await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "RouterAssets", name), ct)).Replace("\r\n", "\n");
         var changed = new List<(FileState Before, string After)>();
         var created = new List<ReservationChange>();
         bool staged = false, cronChanged = false, runtimeStopped = false, started = false;
         string step = "Create protected staging area";
-        string expectedFirmwareHash = c.Router.Rtp2Hash;
         try
         {
             await router.ExecuteAsync($"test ! -L /root/hotswapper && umask 077 && mkdir -p /root/hotswapper && chmod 700 /root/hotswapper && test ! -L {Home} && test ! -L {Home}/backups && umask 077 && mkdir -p {Home}/backups && chmod 700 {Home} {Home}/backups && mkdir {Stage}", ct);
@@ -52,17 +51,12 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                 if (path.EndsWith(".sh") || path.EndsWith(".conf")) await router.ExecuteAsync($"sh -n {Q(file)}", ct);
             }
             await router.ExecuteAsync($"sh {Stage}/install-gl-guard.sh --check", ct);
-            if (!CompatibilityCatalog.IsPatched(c.Router.Rtp2Hash))
-            {
-                step = "Validate GL guard against a private firmware copy";
-                await router.ExecuteAsync($"cp /usr/bin/rtp2.sh {Stage}/rtp2.preview && chmod 600 {Stage}/rtp2.preview && HOTSWAPPER_RTP2_TARGET={Stage}/rtp2.preview sh {Stage}/install-gl-guard.sh --install", ct);
-                expectedFirmwareHash = (await router.ExecuteAsync($"sha256sum {Stage}/rtp2.preview | awk '{{print $1}}'", ct)).Trim();
-            }
             step = "Back up affected files"; progress.Report(step);
             foreach (var before in fresh.Files)
             {
-                bool firmware = before.Path == "/usr/bin/rtp2.sh";
-                if (firmware && CompatibilityCatalog.IsPatched(c.Router.Rtp2Hash)) continue;
+                var target = FirmwareTargets.Find(before.Path);
+                bool firmware = target != null;
+                if (firmware && before.Hash == target!.PatchedHash) continue;
                 if (!firmware && before.Exists && before.Hash == Hash(content[before.Path]) && before.Mode == (before.Path.EndsWith(".sh") ? "700" : "600")) continue;
                 if (before.Exists)
                 {
@@ -101,16 +95,15 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             }
             if (created.Count > 0) await router.ExecuteAsync("/etc/init.d/dnsmasq reload", ct);
             step = "Apply GL reconciliation guard"; progress.Report(step);
-            if (!CompatibilityCatalog.IsPatched(c.Router.Rtp2Hash))
+            var firmwareChanges = fresh.Files.Where(f => FirmwareTargets.Find(f.Path) is { } t && f.Hash != t.PatchedHash).ToArray();
+            foreach (var before in firmwareChanges)
             {
-                var before = fresh.Files.Single(f => f.Path == "/usr/bin/rtp2.sh");
-                // The authoritative patcher makes its original-file, SHA-named backup as well.
-                changed.Add((before, expectedFirmwareHash));
+                changed.Add((before, FirmwareTargets.Find(before.Path)!.PatchedHash));
                 await router.ExecuteAsync(Unchanged(before), ct);
-                await router.ExecuteAsync("/root/hotswapper/install-gl-guard.sh --install", ct);
-                var after = (await router.ExecuteAsync("sha256sum /usr/bin/rtp2.sh | awk '{print $1}'", ct)).Trim();
-                if (after != expectedFirmwareHash) throw new SafeFailure("The applied reconciliation guard differs from its validated preview.");
             }
+            if (firmwareChanges.Length > 0)
+                await router.ExecuteAsync("/root/hotswapper/install-gl-guard.sh --install", ct);
+            await router.ExecuteAsync("/root/hotswapper/install-gl-guard.sh --verify", ct);
             step = "Configure schedules"; progress.Report(step);
             currentCron = await router.ExecuteAsync("crontab -l 2>/dev/null || true", ct);
             await WriteCronAsync(CronPlanner.Generate(currentCron, c.Maintenance), currentCron, ct);
@@ -124,7 +117,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
         {
             bool rollbackOk = true;
             using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-            progress.Report("Installation did not finish. Restoring changes made by this attempt…");
+            progress.Report("Installation did not finish. Restoring changes made by this attemptâ€¦");
             try
             {
                 if (staged)
@@ -193,7 +186,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
         {
             using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             try {
-                string temporary = string.Join(" ", content.Keys.Append("/usr/bin/rtp2.sh").SelectMany(p => new[]{Q(p+".hotswap-new-"+suffix),Q(p+".hotswap-restore-"+suffix)}));
+                string temporary = string.Join(" ", content.Keys.Concat(FirmwareTargets.All.Select(t => t.Path)).SelectMany(p => new[]{Q(p+".hotswap-new-"+suffix),Q(p+".hotswap-restore-"+suffix)}));
                 await router.ExecuteAsync($"rm -f {temporary}; test ! -L /root/hotswapper && umask 077 && mkdir -p /root/hotswapper && chmod 700 /root/hotswapper && test ! -L {Home} && test ! -L {Stage} && rm -rf {Stage}", cleanup.Token);
             } catch {
                 progress.Report("WARN: Temporary file cleanup was incomplete. A later installation uses a fresh directory; backups and running state were retained.");
@@ -223,7 +216,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                 await router.ExecuteAsync($"test -f {Q(path)} && {FileMetadata.MatchesCommand(path, path.EndsWith(".sh") ? "700" : "600")} && test \"$(sha256sum {Q(path)} | awk '{{print $1}}')\" = {Q(Hash(body))}", ct);
             }
             operation = "GL reconciliation guard";
-            await router.ExecuteAsync("test \"$(grep -Fc '# hotswapper GL reconciliation guard v1' /usr/bin/rtp2.sh)\" = 1 && sh -n /usr/bin/rtp2.sh && /root/hotswapper/install-gl-guard.sh --check", ct);
+            await router.ExecuteAsync("/root/hotswapper/install-gl-guard.sh --verify", ct);
             operation = "owned cron entries";
             var cron = await router.ExecuteAsync("crontab -l 2>/dev/null", ct);
             if (CronPlanner.Generate(cron, c.Maintenance) != cron) throw new SafeFailure("The installed schedules differ from the reviewed plan.");
@@ -256,6 +249,13 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             if ((await router.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim() != runtime["current_iface"] ||
                 (await router.ExecuteAsync($"uci -q get route_policy.{policy}.peer_id", ct)).Trim() != runtime["current_peer"])
                 throw new SafeFailure("The route policy and Hotswapper runtime disagree.");
+            operation = "CURRENT and retained candidate ownership";
+            foreach (var role in new[] { "current", "uptier", "downtier" })
+            {
+                if (runtime.GetValueOrDefault(role + "_iface", "") is not { Length: > 0 } iface) continue;
+                string peer = runtime[role + "_peer"];
+                await router.ExecuteAsync($"/root/hotswapper/gl-coordination.sh owned {Q(iface)} {Q("peer_" + peer)}", ct);
+            }
             operation = "WireGuard handshake observation";
             foreach (var iface in new[] { runtime["current_iface"], runtime.GetValueOrDefault("downtier_iface", ""), runtime.GetValueOrDefault("uptier_iface", "") }.Where(v => v.Length > 0))
             {
@@ -278,7 +278,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                 catch(OperationCanceledException){throw;}
                 catch { warnings.Add("WARN: Router notification test failed; installation remains valid. Check the topic or notification service."); }
             }
-            return new List<string> { "Hotswapper: Running", CompatibilityCatalog.IsPatched(c.Router.Rtp2Hash) ? "GL Guard: Already installed" : "GL Guard: Installed", "VPN CURRENT: Verified (standby availability may vary)", "Supervisor and schedules: Verified",
+            return new List<string> { "Hotswapper: Running", c.Router.Rtp2Hash == CompatibilityCatalog.PatchedHash ? "GL Guard: Already installed" : "GL Guard: Installed", "VPN CURRENT: Verified (standby availability may vary)", "Supervisor and schedules: Verified",
                 c.Notifications ? "Notifications: Enabled (see delivery warnings, if any)" : "Notifications: Disabled",
                 c.Maintenance ? "Maintenance: Enabled" : "Maintenance: Disabled" }.Concat(warnings).ToArray();
         }

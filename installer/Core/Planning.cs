@@ -10,12 +10,13 @@ public static class CompatibilityCatalog
     public const string StockHash = "749518706ad6af15104c90ddba5aa99142e1a9c678fec9074cd4222f8595f82c";
     public static readonly HashSet<string> TestedFirmware = ["4.9.0"];
     // Current-layout guard hash reproduced from the archived stock firmware.
-    public const string PatchedHash = "5c4b26eebdd3cdb6876b7b5e9f48901d8061b525837c1d879f0d059d856f150c";
+    public const string PreviousGuardHash = "5c4b26eebdd3cdb6876b7b5e9f48901d8061b525837c1d879f0d059d856f150c";
+    public const string PatchedHash = "84339bc25c130a0c2b31dae698bae1b224d0fc58074964a0ade37a8b84b060e1";
     public static bool IsPatched(string hash) => Classify(hash) is Compatibility.AlreadyPatchedKnownCompatible;
     public static readonly HashSet<string> IncompatibleHashes = new(StringComparer.OrdinalIgnoreCase);
     public static Compatibility Classify(string hash) => IncompatibleHashes.Contains(hash) ? Compatibility.KnownIncompatible
         : hash.Equals(StockHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.StockKnownCompatible
-        : hash.Equals(PatchedHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.AlreadyPatchedKnownCompatible : Compatibility.Unknown;
+        : (hash.Equals(PatchedHash, StringComparison.OrdinalIgnoreCase) || hash.Equals(PreviousGuardHash, StringComparison.OrdinalIgnoreCase)) ? Compatibility.AlreadyPatchedKnownCompatible : Compatibility.Unknown;
 }
 public interface IVpnLocationResolver { IReadOnlyList<VpnLocationGroup> Group(IEnumerable<VpnConnection> peers); }
 // Verified GL 4.9.0 country,city metadata. Identity is scoped to this provider layout,
@@ -34,7 +35,7 @@ public static class ConfigurationGenerator
     public static void Validate(InstallerConfiguration c)
     {
         if (c.RebootWindowStart is < 0 or > 23 || c.RebootWindowEnd is < 0 or > 23 || c.RebootWindowStart > c.RebootWindowEnd)
-            throw new SafeFailure("Maintenance hours must be 00–23 with From no later than To (same-day window).");
+            throw new SafeFailure("Maintenance hours must be 00â€“23 with From no later than To (same-day window).");
         if (!c.Router.IsBrume) throw new SafeFailure("Installation is supported only on GL-MT5000.");
         if (CompatibilityCatalog.Classify(c.Router.Rtp2Hash) == Compatibility.KnownIncompatible) throw new SafeFailure("This firmware reconciliation script is incompatible.");
         if (!Regex.IsMatch(c.Profile.TunnelId, "^[0-9]+$") || !Regex.IsMatch(c.Profile.GroupId, "^[0-9]+$")) throw new SafeFailure("VPN identifiers are invalid.");
@@ -125,7 +126,7 @@ public class DiagnosticLog
 {
     private readonly List<string> entries = [];
     public void Add(string safeMessage) => entries.Add($"{DateTimeOffset.Now:HH:mm:ss} {safeMessage}");
-    public string Report(bool demo) => $"Brume 3 Hotswapper installation report\nMode: {(demo ? "DEMO — no router operations" : "Real")}\n" + string.Join('\n', entries);
+    public string Report(bool demo) => $"Brume 3 Hotswapper installation report\nMode: {(demo ? "DEMO â€” no router operations" : "Real")}\n" + string.Join('\n', entries);
     public static string Redact(string text, params string[] secrets)
     {
         foreach (var secret in secrets.Where(s => !string.IsNullOrEmpty(s)).OrderByDescending(s => s.Length)) text = text.Replace(secret, "[redacted]", StringComparison.Ordinal);

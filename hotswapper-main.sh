@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# GL.iNet / NordVPN three-slot watchdog v14.1 guarded fastpath
+# GL.iNet / NordVPN three-slot watchdog with owned hot candidates
 # - one CURRENT tunnel
 # - one hot DOWNTIER on the next lower tier
 # - a directional UPTIER candidate, never a permanently assigned worker slot
@@ -18,8 +18,6 @@
 #
 # The hot downtier is always the next configured LOWER internal rank.
 # Notifications report MAJOR tier changes and recovery from a WAN outage.
-# v14.1: v14 guarded fastpath with detailed promotion timing disabled by default.
-# Set DEBUG_TIMING=1 in /root/hotswapper/hotswapper.conf to restore promotion-timing.log writes.
 
 TUNNEL_ID=""
 GROUP_ID=""
@@ -66,10 +64,18 @@ LOG_MAX_BYTES=524288
 NORD_BACKOFF_SECONDS=900
 NTFY_URL=""
 DEBUG_TIMING=0
-# Microseconds; each completed pass is followed by this delay.
+# Startup delay calibration; detector cadence is start-to-start below.
 DETECTOR_DELAY_US=150000
 FAST_PROBE_WINDOW_US=200000
 FAST_FAILURE_THRESHOLD=2
+DETECTOR_PERIOD_MS=400
+DETECTOR_NOW=0
+READY_MAX_AGE_MS=5000
+STANDBY_CHECK_MS=4000
+NEXT_STANDBY_CHECK=0
+WAKE_REQUESTED=0
+DELAY_PID=""
+POLICY_SECTION=""
 DETECTOR_ENABLED=0
 IN_DETECTOR=0
 DETECT_CURRENT=""
@@ -95,6 +101,8 @@ awk -F '\t' '
     { tiers[$1]=$2; ids[$1]=$4; orders[$1]=$3; labels[$1]=$5; if ($2 == 1) preferred=1 }
     END { if (bad || !NR || !preferred) exit 1 }
 ' "$LOCATION_FILE" || { echo "Invalid location configuration" >&2; exit 1; }
+
+. /root/hotswapper/gl-coordination.sh || exit 1
 
 umask 077
 mkdir -p "$PERSIST_DIR" "$RUNTIME_DIR" "${LOG_FILE%/*}"
@@ -200,7 +208,15 @@ acquire_lock() {
 # BusyBox applets are build-dependent. Both installer and daemon verify elapsed
 # time, not just command existence. No fractional sleep or whole-second fallback.
 delay_us() {
-    busybox usleep "$1"
+    busybox usleep "$1" & DELAY_PID=$!
+    wait "$DELAY_PID" 2>/dev/null; local rc=$?
+    if [ "$WAKE_REQUESTED" = 1 ]; then
+        kill "$DELAY_PID" 2>/dev/null || true
+        wait "$DELAY_PID" 2>/dev/null || true
+        rc=0
+    fi
+    DELAY_PID=""
+    return "$rc"
 }
 
 verify_delay() {
@@ -226,7 +242,11 @@ stop_slow_command() {
 }
 
 slow_command() {
-    local command_rc
+    local command_rc HS_SLOT_IDENTITY=""
+    if [ "$1" = /usr/bin/setup_instance ]; then
+        HS_SLOT_IDENTITY=$(cat "$HS_DIR/owned.$3" 2>/dev/null)
+    fi
+    export HS_SLOT_IDENTITY
     if [ "$IN_DETECTOR" = 1 ] || [ "${PROMOTION_CRITICAL:-0}" = 1 ]; then "$@" >/dev/null 2>&1; return $?; fi
     if [ "$DETECTOR_ENABLED" != 1 ]; then
         "$@" > "$RUNTIME_DIR/command-output" 2>&1
@@ -252,16 +272,34 @@ cooperative_pause() {
 }
 
 fast_path_round() {
-    local iface="$1" first second r1 r2
-    # Concurrent *packets*, not concurrent detector passes. Both children are
-    # always reaped before returning. No GNU timeout/fractional ping assumption.
+    local iface="$1" first second elapsed=0 result=1
     ping -n -I "$iface" -c 1 -W 1 -w 1 1.1.1.1 >/dev/null 2>&1 & first=$!
     ping -n -I "$iface" -c 1 -W 1 -w 1 8.8.8.8 >/dev/null 2>&1 & second=$!
-    delay_us "$FAST_PROBE_WINDOW_US" || { kill "$first" "$second" 2>/dev/null; wait "$first"; wait "$second"; exit 1; }
-    kill "$first" "$second" 2>/dev/null || true
-    wait "$first"; r1=$?
-    wait "$second"; r2=$?
-    [ "$r1" -eq 0 ] || [ "$r2" -eq 0 ]
+    # Check completed children at most four times. A successful reply ends the round.
+    while [ "$elapsed" -lt "$FAST_PROBE_WINDOW_US" ]; do
+        if [ -n "$first" ] && ! kill -0 "$first" 2>/dev/null; then
+            wait "$first" && result=0
+            first=""
+        fi
+        if [ -n "$second" ] && ! kill -0 "$second" 2>/dev/null; then
+            wait "$second" && result=0
+            second=""
+        fi
+        [ "$result" = 0 ] && break
+        [ "$WAKE_REQUESTED" = 0 ] || break
+        delay_us 50000 || break
+        elapsed=$((elapsed + 50000))
+    done
+    for child in "$first" "$second"; do
+        [ -n "$child" ] || continue
+        if ! kill -0 "$child" 2>/dev/null; then
+            wait "$child" && result=0
+        else
+            kill "$child" 2>/dev/null || true
+            wait "$child" 2>/dev/null || true
+        fi
+    done
+    return "$result"
 }
 
 iface_hard_up() {
@@ -282,6 +320,7 @@ EOF
 fast_health_pass() {
     local selected candidate peer failed=0
     [ "$IN_DETECTOR" = 0 ] || return 0
+    WAKE_REQUESTED=0
     selected="$(current_iface)"
     if [ "$selected" != "$DETECT_CURRENT" ]; then
         # GL can change policy independently. Never use stale cached role identity.
@@ -290,7 +329,7 @@ fast_health_pass() {
         return 0
     fi
     [ "$SLOW_REQUESTED" = 0 ] && [ "$DETECT_FAILED" = 0 ] || return 0
-    if ! iface_hard_up "$DETECT_CURRENT"; then
+    if ! owned_hard_up "$DETECT_CURRENT"; then
         failed=1
     elif fast_path_round "$DETECT_CURRENT"; then
         FAST_FAILURES=0
@@ -298,14 +337,16 @@ fast_health_pass() {
         FAST_FAILURES=$((FAST_FAILURES + 1))
         [ "$FAST_FAILURES" -lt "$FAST_FAILURE_THRESHOLD" ] || failed=1
     fi
-    [ "$failed" = 1 ] || return 0
+    if [ "$failed" != 1 ]; then
+        refresh_standby_health
+        return 0
+    fi
     IN_DETECTOR=1
     DETECT_FAILED=1
-    rm -f "$RUNTIME_DIR/ready.$DETECT_CURRENT"
+    rm -f "$RUNTIME_DIR/ready.$DETECT_CURRENT" "$HS_DIR/readiness.$DETECT_CURRENT"
     # Cached roles only: no rank searches, WAN diagnosis or provider work here.
     for candidate in "$DETECT_UP" "$DETECT_DOWN"; do
         [ -n "$candidate" ] && [ "$candidate" != "$DETECT_CURRENT" ] || continue
-        iface_hard_up "$candidate" && fast_path_round "$candidate" || continue
         peer="$(iface_peer "$candidate")"
         if promote_iface "$candidate" "$peer" current-failure-hot-candidate; then
             DETECT_CURRENT="$candidate"; DETECT_UP=""; DETECT_DOWN=""
@@ -319,12 +360,18 @@ fast_health_pass() {
 }
 
 detector_iteration() {
+    local started remaining
+    started=$(monotonic_ms)
+    DETECTOR_NOW=$started
     fast_health_pass
-    # Delay starts AFTER the complete pass, including any promotion.
-    delay_us "$DETECTOR_DELAY_US" || exit 1
+    remaining=$((DETECTOR_PERIOD_MS - $(monotonic_ms) + started))
+    [ "$remaining" -gt 0 ] || return 0
+    [ "$WAKE_REQUESTED" = 0 ] || return 0
+    delay_us "$((remaining * 1000))" || exit 1
 }
 
 policy_section() {
+    [ -z "$POLICY_SECTION" ] || { echo "$POLICY_SECTION"; return; }
     uci -q show route_policy 2>/dev/null | \
         sed -n "s/^route_policy\.\([^.=]*\)\.tunnel_id='${TUNNEL_ID}'$/\1/p" | \
         head -n 1
@@ -567,10 +614,16 @@ teardown_iface() {
 
     [ "$DETECT_UP" != "$iface" ] || DETECT_UP=""
     [ "$DETECT_DOWN" != "$iface" ] || DETECT_DOWN=""
+    grant_lifecycle "$iface" down
     slow_command ifdown "$iface" || true
     slow_command /usr/bin/setup_instance stop "$iface" || true
     slow_command /usr/bin/setup_instance clean "$iface" || true
     rm -f "$RUNTIME_DIR/ready.$iface" "/tmp/wireguard/${iface}_state" "$(probe_stamp_file "$iface")" "$(health_fail_file "$iface")" 2>/dev/null
+    hs_lock || return 1
+    [ "$iface" != "$(current_iface)" ] || { hs_unlock; return 1; }
+    remove_prepared_firewall "$iface"
+    rm -f "$HS_DIR/owned.$iface" "$HS_DIR/readiness.$iface" "$HS_DIR/reservation.$iface"
+    hs_unlock
     return 0
 }
 
@@ -581,7 +634,7 @@ teardown_iface() {
 #   3 = global Nord auxiliary backoff is active / was just entered
 prepare_iface() {
     local iface="$1" peer="$2" purpose="$3"
-    local out rc i current state epoch="$PROMOTION_EPOCH"
+    local out rc i current state token epoch="$PROMOTION_EPOCH"
 
     in_backoff && return 3
 
@@ -593,6 +646,7 @@ prepare_iface() {
 
     log "Preparing $purpose candidate on $iface: peer=$peer server=$(peer_name "$peer") location=$(peer_location "$peer")"
 
+    claim_slot "$iface" "$peer" || return 1
     slow_command /usr/bin/setup_instance generate "$iface" "$GROUP_ID" "$peer"
     rc=$?
     out="$(cat "$RUNTIME_DIR/command-output")"
@@ -634,15 +688,20 @@ prepare_iface() {
         return 1
     fi
 
-    slow_command ifup "$iface" || true
+    grant_lifecycle "$iface" up || return 1
+    slow_command /etc/init.d/network reload || return 1
     [ "$epoch" = "$PROMOTION_EPOCH" ] && [ "$current" = "$(current_iface)" ] || return 2
 
     i=0
     while [ "$i" -lt "$CONNECT_TIMEOUT" ]; do
         if iface_established_fresh "$iface"; then
-            # Prove that this specific tunnel also carries traffic before accepting it.
+            slow_command /usr/bin/rtp2.sh hotswapper_prepare "$iface" || return 1
+            prepare_dataplane "$iface" || return 1
+            token=$(readiness_token "$iface") || return 1
+            # Probe only after the candidate's actual forwarding/DNS support is installed.
             if probe_iface_path "$iface"; then
                 [ "$epoch" = "$PROMOTION_EPOCH" ] && [ "$current" = "$(current_iface)" ] || return 2
+                record_readiness "$iface" "$token" || return 1
                 printf '%s\n' "$peer" > "$RUNTIME_DIR/ready.$iface"
                 log "Connected $purpose candidate: $(iface_summary "$iface")"
                 return 0
@@ -790,47 +849,294 @@ fastpath_mark_for_iface() {
     printf '0x%x000\n' "$idx"
 }
 
+
+claim_slot() (
+    local iface="$1" peer="$2" generation=0 index=0 previous
+    hs_lock || return 1
+    [ "$(uci -q get "wireguard.peer_$peer.group_id")" = "$GROUP_ID" ] || return 1
+    [ -r "$HS_DIR/generation" ] && read -r generation < "$HS_DIR/generation"
+    generation=$((generation + 1))
+    printf '%s\n' "$generation" > "$HS_DIR/generation"
+    [ ! -r "/sys/class/net/$iface/ifindex" ] || read -r index < "/sys/class/net/$iface/ifindex"
+    previous=$(uci -q get "network.$iface.config")
+    printf '%s %s\n' "$generation" "${previous:-none}" > "$HS_DIR/reservation.$iface"
+    printf '%s %s %s %s %s\n' "$peer" "$GROUP_ID" "$TUNNEL_ID" "$generation" "$index" > "$HS_DIR/owned.$iface.new"
+    mv "$HS_DIR/owned.$iface.new" "$HS_DIR/owned.$iface"
+    rm -f "$HS_DIR/readiness.$iface"
+)
+
+grant_lifecycle() {
+    local peer group tunnel generation index
+    [ -r "$HS_DIR/owned.$1" ] || return 0
+    read -r peer group tunnel generation index < "$HS_DIR/owned.$1" || return 1
+    : > "$HS_DIR/permit.$1.$2.$generation"
+}
+
+start_ownership() {
+    local stamp iface peer
+    trap 'WAKE_REQUESTED=1; [ -z "$DELAY_PID" ] || kill "$DELAY_PID" 2>/dev/null || true' USR1
+    [ "$(policy_get killswitch)" = 1 ] &&
+        [ "$(policy_get via_type)" = wireguard ] &&
+        [ "$(uci -q get route_policy.global.instance_on)" = 1 ] || return 1
+    hs_lock fast || return 1
+    hs_drain_old_workers || { hs_unlock; return 1; }
+    stamp=$(awk '{print $22}' "/proc/$$/stat")
+    HS_REQUEST="$$:$stamp"; export HS_REQUEST
+    printf '%s %s\n' "$$" "$stamp" > "$HS_DIR/owner.new"
+    mv "$HS_DIR/owner.new" "$HS_DIR/owner"
+    printf '%s:%s\n' "$TUNNEL_ID" "$GROUP_ID" > "$HS_DIR/tunnel"
+    rm -f "$HS_DIR/promotion-waiting"
+    for iface in $SLOTS; do
+        peer=$(iface_peer "$iface")
+        [ -n "$peer" ] || continue
+        [ "$(peer_rank "$peer")" -gt 0 ] || continue
+        claim_slot "$iface" "$peer" || { hs_unlock; return 1; }
+    done
+    hs_unlock
+    prepare_dataplane "$(current_iface)"
+}
+
+owned_hard_up() {
+    local iface="$1" peer group tunnel generation index actual state link flags route
+    case "$iface" in wgclient1|wgclient2|wgclient3) ;; *) return 1;; esac
+    read -r peer group tunnel generation index < "$HS_DIR/owned.$iface" || return 1
+    [ "$group:$tunnel" = "$GROUP_ID:$TUNNEL_ID" ] || return 1
+    [ "$(uci -q get "network.$iface.config")" = "peer_$peer" ] || return 1
+    read -r actual < "/sys/class/net/$iface/ifindex" || return 1
+    [ "$index" = "$actual" ] || return 1
+    read -r state < "/tmp/wireguard/${iface}_state" || return 1
+    [ "$state" = connected ] || return 1
+    link=$(ip -o link show "$iface" 2>/dev/null) || return 1
+    flags=${link#*<}; flags=${flags%%>*}
+    case ",$flags," in *,UP,*) ;; *) return 1;; esac
+    route=$(ip -4 route get 1.1.1.1 mark "$(fastpath_mark_for_iface "$iface")" 2>/dev/null) || return 1
+    case " $route " in *" dev $iface "*) return 0;; *) return 1;; esac
+}
+
+prepared_dataplane_matches() {
+    local iface="$1" mark
+    mark=$(fastpath_mark_for_iface "$iface")
+    iptables -w 1 -t filter -C FORWARD -i br-lan -o "$iface" -m mark --mark "$mark/0xf000" -j ACCEPT >/dev/null 2>&1 &&
+    iptables -w 1 -t nat -C POSTROUTING -o "$iface" -j MASQUERADE >/dev/null 2>&1 &&
+    iptables -w 1 -t mangle -C FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu >/dev/null 2>&1 &&
+    iptables -w 1 -t filter -C FORWARD -i "$iface" -o br-lan -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1 &&
+    iptables -w 1 -t filter -C HOTSWAPPER_EGRESS -m mark --mark "$mark/0xf000" ! -o "$iface" -j DROP >/dev/null 2>&1 &&
+    iptables -w 1 -t filter -C FORWARD -i br-lan -j HOTSWAPPER_EGRESS >/dev/null 2>&1 &&
+    iptables -w 1 -t filter -C OUTPUT -j HOTSWAPPER_EGRESS >/dev/null 2>&1 &&
+    iptables -w 1 -t mangle -S ROUTE_POLICY | grep -q 'hotswapper-fastpath.*-j HOTSWAPPER_SELECTED' || return 1
+    iptables -w 1 -t mangle -S HOTSWAPPER_SELECTED | awk '/^-A / {n++; if ($3 != "-j" || ($4 != "MARK" && $4 != "DROP")) bad=1} END {exit (n!=1 || bad)}' || return 1
+    local port
+    port=$(uci -q get "dhcp.$iface.port")
+    case "$port" in ''|*[!0-9]*) return 1;; esac
+    iptables -w 1 -t nat -C policy_redirect -p udp -m mark --mark "$mark/0xf000" -j REDIRECT --to-ports "$port" >/dev/null 2>&1 &&
+    iptables -w 1 -t nat -C policy_output -p udp -m mark --mark "$mark/0xf000" -m owner --gid-owner usevpn -m udp --dport 53 -j REDIRECT --to-ports "$port" >/dev/null 2>&1 &&
+    iptables -w 1 -t raw -C pre_dns_deal_conn_zone -p udp -m mark --mark "$mark/0xf000" ! -i lo -j CT --zone "$mark" >/dev/null 2>&1 &&
+    iptables -w 1 -t raw -C out_dns_deal_conn_zone -p udp --sport "$port" ! -o lo -j CT --zone "$mark" >/dev/null 2>&1
+}
+
+prepare_selector() {
+    local mark process tid chain position via rules="$HS_DIR/selector.rules"
+    mark=$(policy_get mark)
+    if iptables -w 1 -t mangle -N HOTSWAPPER_SELECTED 2>/dev/null; then
+        iptables -w 1 -t mangle -A HOTSWAPPER_SELECTED -j MARK --set-xmark "$mark/0xf000" || return 1
+    else
+        # A previous failed promotion deliberately left DROP here. Only a validated
+        # promotion may replace it; background preparation must never reopen it.
+        iptables -w 1 -t mangle -C HOTSWAPPER_SELECTED -j DROP >/dev/null 2>&1 ||
+            iptables -w 1 -t mangle -C HOTSWAPPER_SELECTED -j MARK --set-xmark "$mark/0xf000" >/dev/null 2>&1 || return 1
+    fi
+    echo '*mangle' > "$rules"
+    # Remove just our old bindings; the replacement keeps GL's source/destination scope.
+    for chain in ROUTE_POLICY LOCAL_POLICY; do
+        iptables -w 1 -t mangle -S "$chain" | awk '/hotswapper-fastpath|hotswapper-process/ {sub(/^-A /,"-D ");print}' >> "$rules"
+    done
+    position=$(iptables -w 1 -t mangle -S ROUTE_POLICY | awk -v chain="TUNNEL${TUNNEL_ID}_ROUTE_POLICY" '/^-A / && !/hotswapper-fastpath|hotswapper-process/ {n++;if($NF==chain) {print n;exit}}')
+    case "$position" in ''|*[!0-9]*) return 1;; esac
+    iptables -w 1 -t mangle -S "TUNNEL${TUNNEL_ID}_ROUTE_POLICY" | awk -v position="$position" '
+        /-j MARK --set-xmark/ {
+            sub(/^-A [^ ]+ /,"-I ROUTE_POLICY "position" -m addrtype ! --dst-type LOCAL -m mark --mark 0x0/0xc000 ")
+            gsub(/-m comment --comment "[^"]*" /,"")
+            sub(/-m mark --mark 0x0\/0xf000 /,"")
+            sub(/-j MARK --set-xmark [^ ]+/,"-m comment --comment hotswapper-fastpath -j HOTSWAPPER_SELECTED")
+            print; n++
+        }
+        END {if(n!=1) exit 1}
+    ' >> "$rules" || return 1
+    for process in gl_process_vpn gl_process; do
+        via=$(uci -q get "route_policy.$process.via")
+        if [ "$process" = gl_process_vpn ]; then
+            hs_owned "$via" &&
+                [ "$(uci -q get "route_policy.$process")" = rule_process ] &&
+                [ -z "$(uci -q get "route_policy.$process.group_id")" ] || return 1
+        else
+            [ "$via" = "$(current_iface)" ] || continue
+        fi
+        tid=$(uci -q get "route_policy.$process.tunnel_id")
+        case "$tid" in ''|*[!0-9]*) return 1;; esac
+        position=$(iptables -w 1 -t mangle -S LOCAL_POLICY | awk -v chain="TUNNEL${tid}_LOCAL_POLICY" '/^-A / && !/hotswapper-fastpath|hotswapper-process/ {n++;if($NF==chain) {print n;exit}}')
+        case "$position" in ''|*[!0-9]*) return 1;; esac
+        iptables -w 1 -t mangle -S "TUNNEL${tid}_LOCAL_POLICY" | awk -v position="$position" '
+            /-j MARK --set-xmark/ {
+                sub(/^-A [^ ]+ /,"-I LOCAL_POLICY "position" -m mark --mark 0x0/0xc000 ")
+                gsub(/-m comment --comment "[^"]*" /,"")
+                gsub(/-m (connmark|mark) --mark 0x0\/0xf000 /,"")
+                sub(/-j MARK --set-xmark [^ ]+/,"-m comment --comment hotswapper-process -j HOTSWAPPER_SELECTED")
+                print; n++
+            }
+            END {if(!n) exit 1}
+        ' >> "$rules" || return 1
+    done
+    echo COMMIT >> "$rules"
+    iptables-restore -w 1 --noflush < "$rules"
+}
+
+prepare_dataplane() (
+    local iface="$1" slot mark subnet rules="$HS_DIR/egress.rules"
+    hs_lock || return 1
+    hs_owned "$iface" || return 1
+    iptables -w 1 -t filter -N HOTSWAPPER_EGRESS 2>/dev/null || true
+    printf '*filter\n-F HOTSWAPPER_EGRESS\n-A HOTSWAPPER_EGRESS -o lo -j RETURN\n' > "$rules"
+    # Only current directly connected LAN prefixes, never a gateway/default.
+    for subnet in $(ip -4 route show dev br-lan scope link | awk '$1 != "default" && / proto kernel / && !/ via / {print $1}'); do
+        printf '%s\n' "-A HOTSWAPPER_EGRESS -o br-lan -d $subnet -j RETURN" >> "$rules"
+    done
+    for slot in $SLOTS; do
+        hs_owned "$slot" || continue
+        fastpath_prepare_firewall "$slot" || return 1
+        mark=$(fastpath_mark_for_iface "$slot")
+        printf '%s\n' "-A HOTSWAPPER_EGRESS -m mark --mark $mark/0xf000 ! -o $slot -j DROP" >> "$rules"
+    done
+    echo COMMIT >> "$rules"
+    iptables-restore -w 1 --noflush < "$rules" || return 1
+    iptables -w 1 -t filter -C FORWARD -i br-lan -j HOTSWAPPER_EGRESS >/dev/null 2>&1 ||
+        iptables -w 1 -t filter -I FORWARD 1 -i br-lan -j HOTSWAPPER_EGRESS || return 1
+    iptables -w 1 -t filter -C OUTPUT -j HOTSWAPPER_EGRESS >/dev/null 2>&1 ||
+        iptables -w 1 -t filter -I OUTPUT 1 -j HOTSWAPPER_EGRESS || return 1
+    prepare_selector
+)
+
+readiness_token() {
+    local peer group tunnel generation index epoch=0
+    read -r peer group tunnel generation index < "$HS_DIR/owned.$1" || return 1
+    [ ! -r "$HS_DIR/dataplane-epoch" ] || read -r epoch < "$HS_DIR/dataplane-epoch"
+    printf '%s:%s:%s:%s\n' "$peer" "$generation" "$index" "$epoch"
+}
+
+record_readiness() (
+    local iface="$1" expected="$2" peer group tunnel generation index rank stamp key
+    hs_lock || return 1
+    [ -n "$expected" ] && [ "$expected" = "$(readiness_token "$iface")" ] || return 1
+    owned_hard_up "$iface" && prepared_dataplane_matches "$iface" || return 1
+    read -r peer group tunnel generation index < "$HS_DIR/owned.$iface" || return 1
+    key=$(uci -q get "wireguard.peer_$peer.public_key")
+    [ -n "$key" ] && [ "$key" = "$(wg show "$iface" peers 2>/dev/null)" ] || return 1
+    rank=$(peer_rank "$peer"); stamp=$(monotonic_ms)
+    [ "$rank" -gt 0 ] || return 1
+    printf '%s %s %s\n' "$expected" "$rank" "$stamp" > "$HS_DIR/readiness.$iface.new"
+    mv "$HS_DIR/readiness.$iface.new" "$HS_DIR/readiness.$iface"
+    rm -f "$HS_DIR/invalid.$iface.$generation"
+)
+
+readiness_fresh() {
+    local iface="$1" token rank stamp age peer group tunnel generation index
+    [ -r "$HS_DIR/readiness.$iface" ] || return 1
+    read -r token rank stamp < "$HS_DIR/readiness.$iface" || return 1
+    [ "$token" = "$(readiness_token "$iface")" ] || return 1
+    read -r peer group tunnel generation index < "$HS_DIR/owned.$iface" || return 1
+    [ ! -e "$HS_DIR/invalid.$iface.$generation" ] || return 1
+    age=$(( $(monotonic_ms) - stamp ))
+    [ "$age" -ge 0 ] && [ "$age" -le "$READY_MAX_AGE_MS" ] || return 1
+    [ "${2:-}" = cached ] || { owned_hard_up "$iface" && prepared_dataplane_matches "$iface"; }
+}
+
+candidate_ready() {
+    local token
+    readiness_fresh "$1" cached && return 0
+    token=$(readiness_token "$1") || return 1
+    owned_hard_up "$1" || return 1
+    fast_path_round "$1" && record_readiness "$1" "$token"
+}
+
+refresh_standby_health() {
+    local iface stamp token
+    stamp=$DETECTOR_NOW
+    [ "$stamp" -ge "$NEXT_STANDBY_CHECK" ] || return 0
+    NEXT_STANDBY_CHECK=$((stamp + STANDBY_CHECK_MS))
+    for iface in "$DETECT_UP" "$DETECT_DOWN"; do
+        [ -n "$iface" ] || continue
+        token=$(readiness_token "$iface") || continue
+        if owned_hard_up "$iface" && fast_path_round "$iface"; then
+            record_readiness "$iface" "$token" || true
+        else
+            rm -f "$HS_DIR/readiness.$iface"
+        fi
+    done
+}
+
+synchronize_gl() {
+    local sec="$1" iface="$2" peer="$3" mark="$4" process tid chain rules="$HS_DIR/promotion.rules" old via
+    old=$(uci -q get "route_policy.$sec.via")
+    echo '*mangle' > "$rules"
+    for process in "$sec" gl_process_vpn gl_process; do
+        if [ "$process" = gl_process_vpn ]; then
+            # A previous failed attempt may have moved only some metadata.
+            # Accept stale references only to our own slots, never another VPN.
+            via=$(uci -q get "route_policy.$process.via")
+            hs_owned "$via" &&
+                [ "$(uci -q get "route_policy.$process")" = rule_process ] &&
+                [ -z "$(uci -q get "route_policy.$process.group_id")" ] || return 1
+        else
+            [ "$process" = "$sec" ] || [ "$(uci -q get "route_policy.$process.via")" = "$old" ] || continue
+        fi
+        tid=$(uci -q get "route_policy.$process.tunnel_id")
+        case "$tid" in ''|*[!0-9]*) return 1;; esac
+        if [ "$process" = "$sec" ]; then chain="TUNNEL${tid}_ROUTE_POLICY"; else chain="TUNNEL${tid}_LOCAL_POLICY"; fi
+        printf '%s\n' "-F $chain" >> "$rules"
+        iptables -w 1 -t mangle -S "$chain" | awk -v mark="$mark" '
+            /^-A / {sub(/--set-xmark 0x[0-9a-fA-F]+\/0xf000/,"--set-xmark "mark"/0xf000");print;n++}
+            END {if(!n) exit 1}
+        ' >> "$rules" || return 1
+        uci set "route_policy.$process.via=$iface" || return 1
+        uci set "route_policy.$process.mark=$mark" || return 1
+    done
+    echo COMMIT >> "$rules"
+    iptables-restore -w 1 --noflush < "$rules" || return 1
+    [ -w "/proc/dns_mark/rule${TUNNEL_ID}/mark" ] || return 1
+    printf '%s\n' "$mark" > "/proc/dns_mark/rule${TUNNEL_ID}/mark" || return 1
+    uci set "route_policy.$sec.peer_id=$peer" &&
+    uci set "route_policy.$sec.group_id=$GROUP_ID" && uci commit route_policy
+}
+
 fastpath_prepare_firewall() {
-    local iface="$1"
+    local iface="$1" mark
+    mark=$(fastpath_mark_for_iface "$iface")
 
     # rtp2 normally creates a firewall zone only for the selected VPN
     # interface. A precooked downtier therefore needs the minimum equivalent
     # dataplane rules before we can point LAN traffic at it.
-    iptables -w -t filter -C FORWARD -i br-lan -o "$iface" -j ACCEPT >/dev/null 2>&1 ||
-        iptables -w -t filter -I FORWARD 1 -i br-lan -o "$iface" -j ACCEPT || return 1
-    iptables -w -t filter -C FORWARD -i "$iface" -o br-lan -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1 ||
-        iptables -w -t filter -I FORWARD 1 -i "$iface" -o br-lan -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT || return 1
-    iptables -w -t nat -C POSTROUTING -o "$iface" -j MASQUERADE >/dev/null 2>&1 ||
-        iptables -w -t nat -I POSTROUTING 1 -o "$iface" -j MASQUERADE || return 1
-    iptables -w -t mangle -C FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu >/dev/null 2>&1 ||
-        iptables -w -t mangle -I FORWARD 1 -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || return 1
+    iptables -w 1 -t filter -C FORWARD -i br-lan -o "$iface" -m mark --mark "$mark/0xf000" -j ACCEPT >/dev/null 2>&1 ||
+        iptables -w 1 -t filter -I FORWARD 1 -i br-lan -o "$iface" -m mark --mark "$mark/0xf000" -j ACCEPT || return 1
+    iptables -w 1 -t filter -C FORWARD -i "$iface" -o br-lan -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1 ||
+        iptables -w 1 -t filter -I FORWARD 1 -i "$iface" -o br-lan -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT || return 1
+    iptables -w 1 -t nat -C POSTROUTING -o "$iface" -j MASQUERADE >/dev/null 2>&1 ||
+        iptables -w 1 -t nat -I POSTROUTING 1 -o "$iface" -j MASQUERADE || return 1
+    iptables -w 1 -t mangle -C FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu >/dev/null 2>&1 ||
+        iptables -w 1 -t mangle -I FORWARD 1 -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || return 1
     return 0
 }
 
+remove_prepared_firewall() {
+    local iface="$1" mark
+    mark=$(fastpath_mark_for_iface "$iface")
+    iptables -w 1 -t filter -D FORWARD -i br-lan -o "$iface" -m mark --mark "$mark/0xf000" -j ACCEPT 2>/dev/null || true
+    iptables -w 1 -t filter -D FORWARD -i "$iface" -o br-lan -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -w 1 -t nat -D POSTROUTING -o "$iface" -j MASQUERADE 2>/dev/null || true
+    iptables -w 1 -t mangle -D FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    iptables -w 1 -t filter -D HOTSWAPPER_EGRESS -m mark --mark "$mark/0xf000" ! -o "$iface" -j DROP 2>/dev/null || true
+}
+
 fastpath_install_mark_override() {
-    local mark="$1"
-
-    # ROUTE_POLICY rule 1 restores an existing connmark. Insert immediately
-    # after it so even established LAN flows are forced onto the newly current
-    # precooked interface instead of retaining the old interface mark.
-    # Delete our previous override first, if present.
-    while iptables -w -t mangle -D ROUTE_POLICY \
-        -m comment --comment "hotswapper-fastpath" \
-        -m addrtype ! --dst-type LOCAL \
-        -m set ! --match-set "dst_net${TUNNEL_ID}" dst \
-        -j MARK --set-xmark "$mark/0xf000" >/dev/null 2>&1; do :; done
-
-    # Remove an override carrying a different old mark. There can be at most
-    # one from us; identify it by comment and delete by line number.
-    local n
-    n="$(iptables -w -t mangle -L ROUTE_POLICY --line-numbers -n 2>/dev/null | awk '/hotswapper-fastpath/ {print $1; exit}')"
-    [ -n "$n" ] && iptables -w -t mangle -D ROUTE_POLICY "$n" || true
-
-    iptables -w -t mangle -I ROUTE_POLICY 2 \
-        -m comment --comment "hotswapper-fastpath" \
-        -m addrtype ! --dst-type LOCAL \
-        -m set ! --match-set "dst_net${TUNNEL_ID}" dst \
-        -j MARK --set-xmark "$mark/0xf000"
+    iptables -w 1 -t mangle -R HOTSWAPPER_SELECTED 1 -j MARK --set-xmark "$1/0xf000"
 }
 
 fastpath_verify_kernel() {
@@ -844,30 +1150,17 @@ fastpath_verify_kernel() {
     return 0
 }
 
-gl_guard_flag="$RUNTIME_DIR/promotion-in-progress"
-gl_guard_pending="$RUNTIME_DIR/gl-reconcile-pending"
 
 acquire_gl_guard() {
-    # rtp2.sh guard v1 accepts this lock only while this PID is alive and the
-    # timestamp is <=5 seconds old. Use an atomic rename so rtp2 never sees a
-    # half-written flag.
-    local tmp="${gl_guard_flag}.$$"
-    rm -f "$gl_guard_pending" "$tmp"
-    {
-        echo "pid=$$"
-        echo "started=$(now)"
-    } > "$tmp" || { rm -f "$tmp"; return 1; }
-    mv -f "$tmp" "$gl_guard_flag" || { rm -f "$tmp"; return 1; }
-    return 0
+    : > "$HS_DIR/promotion-waiting"
+    if hs_lock fast; then return 0; fi
+    rm -f "$HS_DIR/promotion-waiting"
+    return 1
 }
 
 release_gl_guard() {
-    rm -f "$gl_guard_flag"
-    if [ -s "$gl_guard_pending" ]; then
-        local n
-        n="$(wc -l < "$gl_guard_pending" 2>/dev/null)"
-        log "GL_GUARD deferred_rtp2_calls=${n:-unknown}; final state will be verified by hotswapper; details=$gl_guard_pending"
-    fi
+    hs_unlock
+    rm -f "$HS_DIR/promotion-waiting"
 }
 
 fastpath_verify_consistency() {
@@ -881,193 +1174,82 @@ fastpath_verify_consistency() {
     [ "$(uci -q get "route_policy.${sec}.mark")" = "$mark" ] || return 1
     fastpath_verify_kernel "$iface" "$mark" || return 1
 
-    count="$(iptables -w -t mangle -L ROUTE_POLICY --line-numbers -n 2>/dev/null | grep -c 'hotswapper-fastpath')"
-    [ "$count" = "1" ] || return 1
-    rule="$(iptables -w -t mangle -S ROUTE_POLICY 2>/dev/null | grep 'hotswapper-fastpath')"
-    echo "$rule" | grep -Fq -- "--set-xmark $mark/0xf000" || return 1
+    iptables -w 1 -t mangle -C HOTSWAPPER_SELECTED -j MARK --set-xmark "$mark/0xf000" || return 1
+    iptables -w 1 -t mangle -S "TUNNEL${TUNNEL_ID}_ROUTE_POLICY" | grep -Fq -- "--set-xmark $mark/0xf000" || return 1
+    [ "$(uci -q get route_policy.gl_process_vpn.via)" = "$iface" ] || return 1
+    local process tid dns_mark
+    for process in gl_process_vpn gl_process; do
+        [ "$(uci -q get "route_policy.$process.via")" = "$iface" ] || continue
+        [ "$(uci -q get "route_policy.$process.mark")" = "$mark" ] || return 1
+        tid=$(uci -q get "route_policy.$process.tunnel_id")
+        case "$tid" in ''|*[!0-9]*) return 1;; esac
+        iptables -w 1 -t mangle -S "TUNNEL${tid}_LOCAL_POLICY" | grep -Fq -- "--set-xmark $mark/0xf000" || return 1
+    done
+    prepared_dataplane_matches "$iface" || return 1
+    dns_mark=$(cat "/proc/dns_mark/rule${TUNNEL_ID}/mark" 2>/dev/null)
+    printf '%s\n' "$dns_mark" | grep -Eq '^(0x[0-9a-fA-F]+|0|[1-9][0-9]*)$' || return 1
+    [ "$((dns_mark))" = "$((mark))" ] || return 1
     return 0
 }
 
-restore_policy_metadata() {
-    local sec="$1" peer="$2" group="$3" iface="$4" mark="$5"
-    [ -n "$peer" ] && uci set "route_policy.${sec}.peer_id=$peer"
-    [ -n "$group" ] && uci set "route_policy.${sec}.group_id=$group"
-    [ -n "$iface" ] && uci set "route_policy.${sec}.via=$iface"
-    [ -n "$mark" ] && uci set "route_policy.${sec}.mark=$mark"
-    uci commit route_policy >/dev/null 2>&1 || true
-}
 
 fastpath_rollback() {
-    local sec="$1" old_peer="$2" old_group="$3" old_iface="$4" old_mark="$5" why="$6"
-    log "FAST_ROLLBACK reason=$why old_iface=$old_iface old_peer=$old_peer old_mark=$old_mark"
-
-    # Connectivity first: if the old independent table still exists, restore
-    # the dataplane before repairing GL/UCI bookkeeping.
-    if [ -n "$old_iface" ] && [ -n "$old_mark" ] && fastpath_verify_kernel "$old_iface" "$old_mark"; then
-        fastpath_prepare_firewall "$old_iface" >/dev/null 2>&1 || true
-        fastpath_install_mark_override "$old_mark" >/dev/null 2>&1 || true
-    fi
-    restore_policy_metadata "$sec" "$old_peer" "$old_group" "$old_iface" "$old_mark"
+    # Never send traffic back to a tunnel which was just declared broken.
+    iptables -w 1 -t mangle -R HOTSWAPPER_SELECTED 1 -j DROP ||
+        printf '*mangle\n:HOTSWAPPER_SELECTED - [0:0]\n-F HOTSWAPPER_SELECTED\n-A HOTSWAPPER_SELECTED -j DROP\nCOMMIT\n' |
+            iptables-restore -w 1 --noflush || {
+            # The kernel's selected tables still have terminal DROP routes. Stop
+            # this owner instead of announcing a successful/healthy promotion.
+            log "CRITICAL: unable to install emergency selector DROP"
+            exit 1
+        }
+    rm -f "$HS_DIR/readiness.$1"
+    DETECT_FAILED=1
+    SLOW_REQUESTED=1
 }
 
 promote_iface() {
-    local PROMOTION_CRITICAL=1 # No cooperative yields inside the verified transaction.
-    local iface="$1" peer="$2" reason="$3"
-    local sec new_tier old_tier old_peer old_iface old_group old_mark loc name title body mark
-    local t0 t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 guard_held=0 flipped=0
-
-    t0="$(monotonic_ms)"
-    promo_trace "PROMO_BEGIN_V14_1 reason=$reason iface=$iface peer=$peer mono_ms=$t0"
-
-    iface_healthy "$iface" || {
-        t1="$(monotonic_ms)"
-        promo_trace "PROMO_ABORT stage=initial_iface_healthy elapsed_ms=$((t1-t0))"
-        log "Refusing promotion of unhealthy interface $iface"
-        return 1
-    }
-    t1="$(monotonic_ms)"
-    promo_trace "PROMO_STAGE initial_iface_healthy_ms=$((t1-t0)) cumulative_ms=$((t1-t0))"
-
-    if ! probe_iface_path "$iface"; then
-        t2="$(monotonic_ms)"
-        promo_trace "PROMO_ABORT stage=bound_probe stage_ms=$((t2-t1)) cumulative_ms=$((t2-t0))"
-        log "Refusing promotion of $iface because immediate bound connectivity probe failed"
+    local PROMOTION_CRITICAL=1
+    local iface="$1" peer="$2" reason="$3" sec mark old_peer old_tier new_tier title body trace_start trace_ready trace_flip
+    [ "$DEBUG_TIMING" != 1 ] || trace_start=$(monotonic_ms)
+    candidate_ready "$iface" || return 1
+    acquire_gl_guard || return 1
+    # Revalidate after waiting: neither a slot name nor an old successful probe is enough.
+    if ! readiness_fresh "$iface" || [ "$(iface_peer "$iface")" != "$peer" ]; then
+        release_gl_guard
         return 1
     fi
-    t2="$(monotonic_ms)"
-    promo_trace "PROMO_STAGE bound_probe_ms=$((t2-t1)) cumulative_ms=$((t2-t0))"
-
-    sec="$(policy_section)"
-    [ -n "$sec" ] || return 1
-    old_peer="$(uci -q get "route_policy.${sec}.peer_id")"
-    old_group="$(uci -q get "route_policy.${sec}.group_id")"
-    old_iface="$(uci -q get "route_policy.${sec}.via")"
-    old_mark="$(uci -q get "route_policy.${sec}.mark")"
-    old_tier="$(peer_tier "$old_peer")"
-    new_tier="$(peer_tier "$peer")"
-    mark="$(fastpath_mark_for_iface "$iface")" || return 1
-    t3="$(monotonic_ms)"
-    promo_trace "PROMO_STAGE metadata_lookup_ms=$((t3-t2)) cumulative_ms=$((t3-t0)) section=$sec old_peer=$old_peer old_tier=$old_tier new_tier=$new_tier mark=$mark"
-
-    fastpath_verify_kernel "$iface" "$mark" || {
-        t4="$(monotonic_ms)"
-        promo_trace "PROMO_ABORT stage=kernel_precheck stage_ms=$((t4-t3)) cumulative_ms=$((t4-t0))"
-        log "Fast promotion precheck failed for $iface; refusing unsafe route flip"
-        return 1
-    }
-    t4="$(monotonic_ms)"
-    promo_trace "PROMO_STAGE kernel_precheck_ms=$((t4-t3)) cumulative_ms=$((t4-t0))"
-
-    # Critical section starts only once all non-mutating checks have passed.
-    acquire_gl_guard || {
-        promo_trace "PROMO_ABORT stage=gl_guard_acquire cumulative_ms=$(($(monotonic_ms)-t0))"
-        log "Unable to acquire GL reconciliation guard; refusing fast promotion"
-        return 1
-    }
-    guard_held=1
-    t5="$(monotonic_ms)"
-    promo_trace "PROMO_GUARD_ACQUIRED stage_ms=$((t5-t4)) cumulative_ms=$((t5-t0))"
-
-    fastpath_prepare_firewall "$iface" || {
-        t6="$(monotonic_ms)"
-        promo_trace "PROMO_ABORT stage=fast_firewall stage_ms=$((t6-t5)) cumulative_ms=$((t6-t0))"
-        log "Fast promotion firewall preparation failed for $iface"
-        release_gl_guard; guard_held=0
-        return 1
-    }
-    t6="$(monotonic_ms)"
-    promo_trace "PROMO_STAGE fast_firewall_ms=$((t6-t5)) cumulative_ms=$((t6-t0))"
-
-    fastpath_install_mark_override "$mark" || {
-        t7="$(monotonic_ms)"
-        promo_trace "PROMO_ABORT stage=mark_flip stage_ms=$((t7-t6)) cumulative_ms=$((t7-t0))"
-        log "Fast promotion mark flip failed for $iface"
-        release_gl_guard; guard_held=0
-        return 1
-    }
-    flipped=1
-    t7="$(monotonic_ms)"
-    promo_trace "PROMO_DATAPLANE_FLIPPED mark_flip_ms=$((t7-t6)) cumulative_ms=$((t7-t0)) iface=$iface mark=$mark"
-
-    if ! probe_iface_path "$iface"; then
-        t8="$(monotonic_ms)"
-        promo_trace "PROMO_ABORT stage=postflip_probe stage_ms=$((t8-t7)) cumulative_ms=$((t8-t0))"
-        fastpath_rollback "$sec" "$old_peer" "$old_group" "$old_iface" "$old_mark" "postflip-probe"
-        release_gl_guard; guard_held=0
+    sec=$(policy_section); mark=$(fastpath_mark_for_iface "$iface")
+    old_peer=$(uci -q get "route_policy.$sec.peer_id")
+    old_tier=$(peer_tier "$old_peer"); new_tier=$(peer_tier "$peer")
+    [ "$DEBUG_TIMING" != 1 ] || trace_ready=$(monotonic_ms)
+    if ! fastpath_install_mark_override "$mark"; then release_gl_guard; return 1; fi
+    [ "$DEBUG_TIMING" != 1 ] || trace_flip=$(monotonic_ms)
+    if ! synchronize_gl "$sec" "$iface" "$peer" "$mark" || ! fastpath_verify_consistency "$iface" "$peer" "$mark" "$sec"; then
+        fastpath_rollback "$iface"
+        release_gl_guard
         return 1
     fi
-    t8="$(monotonic_ms)"
-    promo_trace "PROMO_STAGE postflip_probe_ms=$((t8-t7)) cumulative_ms=$((t8-t0))"
-
-    uci set "route_policy.${sec}.peer_id=$peer" || { fastpath_rollback "$sec" "$old_peer" "$old_group" "$old_iface" "$old_mark" "uci-peer"; release_gl_guard; return 1; }
-    uci set "route_policy.${sec}.group_id=$GROUP_ID" || { fastpath_rollback "$sec" "$old_peer" "$old_group" "$old_iface" "$old_mark" "uci-group"; release_gl_guard; return 1; }
-    uci set "route_policy.${sec}.via=$iface" || { fastpath_rollback "$sec" "$old_peer" "$old_group" "$old_iface" "$old_mark" "uci-via"; release_gl_guard; return 1; }
-    uci set "route_policy.${sec}.mark=$mark" || { fastpath_rollback "$sec" "$old_peer" "$old_group" "$old_iface" "$old_mark" "uci-mark"; release_gl_guard; return 1; }
-    t9="$(monotonic_ms)"
-    promo_trace "PROMO_STAGE uci_set_metadata_ms=$((t9-t8)) cumulative_ms=$((t9-t0))"
-
-    if ! uci commit route_policy; then
-        fastpath_rollback "$sec" "$old_peer" "$old_group" "$old_iface" "$old_mark" "uci-commit"
-        release_gl_guard; guard_held=0
-        return 1
-    fi
-    t10="$(monotonic_ms)"
-    promo_trace "PROMO_STAGE uci_commit_ms=$((t10-t9)) cumulative_ms=$((t10-t0))"
-
-    if ! fastpath_verify_consistency "$iface" "$peer" "$mark" "$sec"; then
-        t11="$(monotonic_ms)"
-        promo_trace "PROMO_ABORT stage=consistency_verify stage_ms=$((t11-t10)) cumulative_ms=$((t11-t0))"
-        fastpath_rollback "$sec" "$old_peer" "$old_group" "$old_iface" "$old_mark" "consistency"
-        release_gl_guard; guard_held=0
-        return 1
-    fi
-    t11="$(monotonic_ms)"
-    promo_trace "PROMO_STAGE consistency_verify_ms=$((t11-t10)) cumulative_ms=$((t11-t0))"
-
     release_gl_guard
-    guard_held=0
-    promo_trace "PROMO_GUARD_RELEASED cumulative_ms=$(($(monotonic_ms)-t0))"
-
-    # A deferred rtp2 invocation is diagnostic evidence of a real collision.
-    # Do not replay it blindly: our now-verified final GL/UCI/kernel state makes
-    # a stale reconciliation potentially destructive and usually unnecessary.
-    if [ -s "$gl_guard_pending" ]; then
-        log "GL reconciliation collided with promotion; deferred call retained at $gl_guard_pending"
+    if [ "$DEBUG_TIMING" = 1 ]; then
+        printf 'start=%s ready=%s flip=%s verified=%s\n' "$trace_start" "$trace_ready" "$trace_flip" "$(monotonic_ms)" > "$RUNTIME_DIR/promotion-trace"
     fi
-
-    [ "$(current_iface)" = "$iface" ] || {
-        log "Promotion post-unlock verification failed: policy no longer on $iface"
-        return 1
-    }
-
-    loc="$(peer_location "$peer")"
-    name="$(peer_name "$peer")"
-    promo_trace "PROMO_END_V14_1 total_ms=$(($(monotonic_ms)-t0)) dataplane_flip_at_ms=$((t7-t0)) reason=$reason iface=$iface peer=$peer server=$name location=$loc"
-
     PROMOTION_EPOCH=$((PROMOTION_EPOCH + 1))
     DETECT_CURRENT="$iface"; DETECT_UP=""; DETECT_DOWN=""; FAST_FAILURES=0; DETECT_FAILED=0
-    log "PROMOTED_FAST_GUARDED reason=$reason old_major_tier=$old_tier new_major_tier=$new_tier current=$(iface_summary "$iface")"
-
-    if [ "$new_tier" != "${old_tier:-0}" ]; then
-        if [ "${old_tier:-0}" -eq 0 ] 2>/dev/null; then
-            title="VPN Restored"
-        elif [ "$new_tier" -gt "$old_tier" ] 2>/dev/null; then
-            title="VPN Degraded"
-        elif [ "$new_tier" -eq 1 ] 2>/dev/null; then
-            title="VPN Restored"
-        else
-            title="VPN Improved"
-        fi
-
+    # Delivery and log rotation stay outside the forwarding transaction.
+    printf '%s\n' "PROMOTED reason=$reason current=$iface" > "$RUNTIME_DIR/promotion-log"
+    if [ "$new_tier" != "$old_tier" ]; then
+        if [ "$old_tier" = 0 ] || [ "$new_tier" = 1 ]; then title="VPN Restored"
+        elif [ "$new_tier" -gt "$old_tier" ]; then title="VPN Degraded"
+        else title="VPN Improved"; fi
         case "$new_tier" in
-            1) body="Preferred gateway in use: $name ($loc)." ;;
-            2) body="Fallback gateway in use: $name ($loc)." ;;
-            3) body="Last-resort gateway in use: $name ($loc)." ;;
-            *) body="VPN gateway changed: $name ($loc)." ;;
+            1) body="Preferred gateway in use: $(peer_name "$peer") ($(peer_location "$peer")).";;
+            2) body="Fallback gateway in use: $(peer_name "$peer") ($(peer_location "$peer")).";;
+            3) body="Last-resort gateway in use: $(peer_name "$peer") ($(peer_location "$peer")).";;
+            *) body="VPN gateway changed: $(peer_name "$peer") ($(peer_location "$peer")).";;
         esac
         notify "$title" "$body" || true
     fi
-
     return 0
 }
 
@@ -1155,10 +1337,17 @@ ensure_downtier() {
 promote_hot_candidate() {
     local current="$1" cp="$2" cr="$3" ct="$4" down="$5" up="$6" candidate peer
     for candidate in "$up" "$down"; do
-        [ -n "$candidate" ] && iface_healthy "$candidate" || continue
+        [ -n "$candidate" ] || continue
         peer="$(iface_peer "$candidate")"
         promote_iface "$candidate" "$peer" current-failure-hot-candidate && return 0
     done
+    # If a previous flip left metadata incomplete, a new successful path check
+    # may recover that selection. Never reopen DROP just because the device is up.
+    if iptables -w 1 -t mangle -C HOTSWAPPER_SELECTED -j DROP >/dev/null 2>&1; then
+        rm -f "$HS_DIR/readiness.$current"
+        peer=$(iface_peer "$current")
+        promote_iface "$current" "$peer" consistency-recovery && return 0
+    fi
     return 1
 }
 
@@ -1428,6 +1617,16 @@ recover_offline_best() {
     return 1
 }
 
+repair_prepared_slots() {
+    local iface
+    for iface in $SLOTS; do
+        hs_owned "$iface" && owned_hard_up "$iface" || continue
+        prepared_dataplane_matches "$iface" && continue
+        slow_command /usr/bin/rtp2.sh hotswapper_prepare "$iface" || return 1
+        prepare_dataplane "$iface" || return 1
+    done
+}
+
 run_cycle() {
     local roles current cp cr ct down up target epoch="$PROMOTION_EPOCH" rc
     WAN_CYCLE_RESULT=""
@@ -1438,6 +1637,7 @@ run_cycle() {
         SLOW_REQUESTED=0
         return 0
     fi
+    repair_prepared_slots || return 1
     roles="$(reconcile_roles)"
     IFS='|' read -r current cp cr ct down up target <<EOF
 $roles
@@ -1606,6 +1806,7 @@ pre_reboot_recover_once() {
         return 2
     }
 
+    start_ownership || return 1
     pre_reboot_recover_core
 }
 
@@ -1776,6 +1977,7 @@ test_failover_once() {
             echo "hotswapper is already running, but its daemon could not be validated."
             return 1
         }
+        start_ownership || return 1
         test_failover_core
         return $?
     fi
@@ -1813,17 +2015,28 @@ daemon_loop() {
     acquire_lock || { echo "Hotswapper is already running."; exit 1; }
     local next_slow=0 interval title body
     verify_delay || { log "Sub-second delay capability failed"; return 1; }
+    POLICY_SECTION=$(policy_section)
+    trap 'WAKE_REQUESTED=1; [ -z "$DELAY_PID" ] || kill "$DELAY_PID" 2>/dev/null || true' USR1
+    start_ownership || { log "Unable to establish firmware ownership"; return 1; }
     DETECTOR_ENABLED=1
     refresh_detector_roles
-    log "Hotswapper started; serial 150 ms post-pass detector delay"
+    log "Hotswapper started; owned slots and 400 ms detector cadence"
     while true; do
         detector_iteration
-        if [ "$SLOW_REQUESTED" = 1 ] || [ "$(monotonic_ms)" -ge "$next_slow" ]; then
+        if [ "$SLOW_REQUESTED" = 1 ] || [ "$DETECTOR_NOW" -ge "$next_slow" ]; then
             SLOW_REQUESTED=0
             refresh_detector_roles
             handle_pre_reboot_request
             handle_test_failover_request
             run_cycle || log "Hotswapper slow cycle returned non-zero"
+            if [ -f "$RUNTIME_DIR/promotion-log" ]; then
+                log "$(cat "$RUNTIME_DIR/promotion-log")"
+                rm -f "$RUNTIME_DIR/promotion-log"
+            fi
+            if [ -f "$RUNTIME_DIR/promotion-trace" ]; then
+                promo_trace "$(cat "$RUNTIME_DIR/promotion-trace")"
+                rm -f "$RUNTIME_DIR/promotion-trace"
+            fi
             if [ -f "$RUNTIME_DIR/notification-title" ]; then
                 title="$(cat "$RUNTIME_DIR/notification-title")"; body="$(cat "$RUNTIME_DIR/notification-body")"
                 rm -f "$RUNTIME_DIR/notification-title" "$RUNTIME_DIR/notification-body"
@@ -1843,6 +2056,7 @@ case "${1:-status}" in
         ;;
     once)
         acquire_lock || { echo "hotswapper is already running."; exit 1; }
+        start_ownership || exit 1
         run_cycle
         show_status
         ;;
