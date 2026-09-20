@@ -35,12 +35,12 @@ public static class DeploymentPlanning
             if (!snapshot.Lan.Network.ContainsHost(r.Ip) || snapshot.Lan.RouterAddresses?.Contains(r.Ip) == true) throw new SafeFailure("A protected device address is outside the usable LAN subnet. Refresh LAN discovery.");
         var c = config with { Guards = reservations.Select(r => new LanClient("", r.Ip, r.Mac, !r.Create)).ToArray() };
         var guard = snapshot.Files.Where(f => FirmwareTargets.Find(f.Path) != null).All(f => f.Hash == FirmwareTargets.Find(f.Path)!.PatchedHash)
-            ? "Already installed â€” no change" : "Install owned-VPN coordination patches";
+            ? "Already installed — no change" : "Install owned-VPN coordination patches";
         var changes = snapshot.Files.Where(f => FirmwareTargets.Find(f.Path) == null).Select(f => $"{(f.Exists ? "Update" : "Install")} {f.Path}").ToList();
         changes.Add(guard);
-        changes.AddRange(reservations.Select(r => $"{(r.Create ? "Create" : "Reuse")} DHCP reservation: {r.Mac} â†’ {r.Ip}"));
+        changes.AddRange(reservations.Select(r => $"{(r.Create ? "Create" : "Reuse")} DHCP reservation: {r.Mac} → {r.Ip}"));
         changes.Add("Ensure supervisor schedule occurs once (every five minutes)");
-        changes.Add(c.Maintenance ? $"Ensure hourly maintenance schedule; reboot window {c.RebootWindowStart:00}:00â€“{c.RebootWindowEnd:00}:00, router time" : "Remove the owned maintenance schedule");
+        changes.Add(c.Maintenance ? $"Ensure hourly maintenance schedule; reboot window {c.RebootWindowStart:00}:00–{c.RebootWindowEnd:00}:00, router time" : "Remove the owned maintenance schedule");
         changes.Add(snapshot.WatchdogRunning ? "Restart the existing Hotswapper via supervisor" : "Start Hotswapper via supervisor");
         return new(c, snapshot, reservations, CronPlanner.Generate(snapshot.Cron, c.Maintenance), guard, changes);
     }

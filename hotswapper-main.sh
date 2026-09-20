@@ -19,8 +19,6 @@
 # The hot downtier is always the next configured LOWER internal rank.
 # Notifications report MAJOR tier changes and recovery from a WAN outage.
 
-TUNNEL_ID=""
-GROUP_ID=""
 LOCATION_FILE="/root/hotswapper/hotswapper-locations.tsv"
 SLOTS="wgclient1 wgclient2 wgclient3"
 
@@ -40,38 +38,10 @@ TEST_FAILOVER_REQUEST_FILE="$RUNTIME_DIR/test-failover-request"
 TEST_FAILOVER_RESULT_FILE="$RUNTIME_DIR/test-failover-result"
 TEST_FAILOVER_TIMEOUT=90
 
-# Optional local config. Keep secrets here rather than in this script.
-# Supported variables:
-#   NTFY_URL='https://ntfy.sh/<your-topic>'
-#   LOOP_SECONDS=20
-#   UPTIER_INTERVAL=60
-#   CONNECT_TIMEOUT=18
-#   HANDSHAKE_MAX_AGE=75
-#   DOWNTIER_ATTEMPTS=3
-#   DEBUG_TIMING=1       # optional detailed promotion timing log (default 0)
+# Required private configuration and runtime defaults.
 CONFIG_FILE="/root/hotswapper/hotswapper.conf"
 
-LOOP_SECONDS=20
-UPTIER_INTERVAL=60
-CONNECT_TIMEOUT=18
-HANDSHAKE_MAX_AGE=75
-DOWNTIER_ATTEMPTS=3
-KEEPALIVE_PROBE_INTERVAL=20
-KEEPALIVE_PROBE_TARGETS="1.1.1.1 8.8.8.8 208.67.222.222 208.67.220.220"
-KEEPALIVE_PROBE_TIMEOUT=2
-PATH_FAILURE_THRESHOLD=2
-LOG_MAX_BYTES=524288
-NORD_BACKOFF_SECONDS=900
-NTFY_URL=""
-DEBUG_TIMING=0
-# Startup delay calibration; detector cadence is start-to-start below.
-DETECTOR_DELAY_US=150000
-FAST_PROBE_WINDOW_US=200000
-FAST_FAILURE_THRESHOLD=2
-DETECTOR_PERIOD_MS=400
 DETECTOR_NOW=0
-READY_MAX_AGE_MS=5000
-STANDBY_CHECK_MS=4000
 NEXT_STANDBY_CHECK=0
 WAKE_REQUESTED=0
 DELAY_PID=""
@@ -87,7 +57,14 @@ DETECT_FAILED=0
 SLOW_PID=""
 PROMOTION_EPOCH=0
 
-[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+[ -r "$CONFIG_FILE" ] && sh -n "$CONFIG_FILE" || { echo "Missing or malformed runtime configuration" >&2; exit 1; }
+. "$CONFIG_FILE" || exit 1
+# Reject missing, non-decimal and oversized values before shell arithmetic.
+for value in "$LOOP_SECONDS" "$UPTIER_INTERVAL" "$CONNECT_TIMEOUT" "$HANDSHAKE_MAX_AGE" "$DOWNTIER_ATTEMPTS" "$KEEPALIVE_PROBE_INTERVAL" "$KEEPALIVE_PROBE_TIMEOUT" "$PATH_FAILURE_THRESHOLD" "$LOG_MAX_BYTES" "$NORD_BACKOFF_SECONDS" "$DETECTOR_PERIOD_MS" "$FAST_PROBE_WINDOW_US" "$FAST_FAILURE_THRESHOLD" "$READY_MAX_AGE_MS" "$STANDBY_CHECK_MS"; do
+    case "$value" in ''|0|0*|*[!0-9]*|??????????*) echo "Invalid runtime numeric setting" >&2; exit 1;; esac
+done
+case "$DEBUG_TIMING" in 0|1) ;; *) echo "Invalid DEBUG_TIMING" >&2; exit 1;; esac
+[ -n "$KEEPALIVE_PROBE_TARGETS" ] && [ "${NTFY_URL+x}" = x ] || { echo "Missing runtime setting" >&2; exit 1; }
 
 # Installer data is mandatory. No developer-specific fallback configuration.
 case "$TUNNEL_ID:$GROUP_ID" in *[!0-9:]*|:*|*:) echo "Invalid VPN IDs" >&2; exit 1;; esac

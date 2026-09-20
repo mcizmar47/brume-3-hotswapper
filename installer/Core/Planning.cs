@@ -35,7 +35,7 @@ public static class ConfigurationGenerator
     public static void Validate(InstallerConfiguration c)
     {
         if (c.RebootWindowStart is < 0 or > 23 || c.RebootWindowEnd is < 0 or > 23 || c.RebootWindowStart > c.RebootWindowEnd)
-            throw new SafeFailure("Maintenance hours must be 00â€“23 with From no later than To (same-day window).");
+            throw new SafeFailure("Maintenance hours must be 00–23 with From no later than To (same-day window).");
         if (!c.Router.IsBrume) throw new SafeFailure("Installation is supported only on GL-MT5000.");
         if (CompatibilityCatalog.Classify(c.Router.Rtp2Hash) == Compatibility.KnownIncompatible) throw new SafeFailure("This firmware reconciliation script is incompatible.");
         if (!Regex.IsMatch(c.Profile.TunnelId, "^[0-9]+$") || !Regex.IsMatch(c.Profile.GroupId, "^[0-9]+$")) throw new SafeFailure("VPN identifiers are invalid.");
@@ -68,9 +68,12 @@ public static class ConfigurationGenerator
         return result.ToString().Replace("\r\n", "\n");
     }
     public static string PrivateConfig(InstallerConfiguration c)
-    { Validate(c); return $"TUNNEL_ID={Quote(c.Profile.TunnelId)}\nGROUP_ID={Quote(c.Profile.GroupId)}\nNTFY_URL={Quote(c.Notifications ? NtfyTopic.Normalize(c.NtfyUrl) : "")}\n"; }
+    { Validate(c); return ConfigTemplates.Replace(ConfigTemplates.Read("hotswapper.conf"),
+        ("TUNNEL_ID", Quote(c.Profile.TunnelId)), ("GROUP_ID", Quote(c.Profile.GroupId)),
+        ("NTFY_URL", Quote(c.Notifications ? NtfyTopic.Normalize(c.NtfyUrl) : ""))); }
     public static string Housekeeping(InstallerConfiguration c)
-    { Validate(c); return $"REBOOT_WINDOW_START={c.RebootWindowStart}\nREBOOT_WINDOW_END={c.RebootWindowEnd}\n"; }
+    { Validate(c); return ConfigTemplates.Replace(ConfigTemplates.Read("housekeeping.conf"),
+        ("REBOOT_WINDOW_START", c.RebootWindowStart.ToString()), ("REBOOT_WINDOW_END", c.RebootWindowEnd.ToString())); }
     public static string Guards(InstallerConfiguration c) => string.Join("", c.Guards.Select(d => $"{d.Mac.ToLowerInvariant()}\t{d.Ip}\n"));
 }
 public static class CronPlanner
@@ -126,7 +129,7 @@ public class DiagnosticLog
 {
     private readonly List<string> entries = [];
     public void Add(string safeMessage) => entries.Add($"{DateTimeOffset.Now:HH:mm:ss} {safeMessage}");
-    public string Report(bool demo) => $"Brume 3 Hotswapper installation report\nMode: {(demo ? "DEMO â€” no router operations" : "Real")}\n" + string.Join('\n', entries);
+    public string Report(bool demo) => $"Brume 3 Hotswapper installation report\nMode: {(demo ? "DEMO — no router operations" : "Real")}\n" + string.Join('\n', entries);
     public static string Redact(string text, params string[] secrets)
     {
         foreach (var secret in secrets.Where(s => !string.IsNullOrEmpty(s)).OrderByDescending(s => s.Length)) text = text.Replace(secret, "[redacted]", StringComparison.Ordinal);

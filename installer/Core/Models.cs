@@ -48,8 +48,8 @@ public record ReservationChange(string Mac, string Ip, bool Create);
 public record InstallerConfiguration(RouterIdentity Router, VpnProfile Profile, IReadOnlyList<TierColumn> Tiers,
     bool Notifications, string NtfyUrl, bool Maintenance, IReadOnlyList<LanClient> Guards)
 {
-    public int RebootWindowStart { get; init; } = 3;
-    public int RebootWindowEnd { get; init; } = 14;
+    public int RebootWindowStart { get; init; } = ConfigTemplates.MaintenanceHours.Start;
+    public int RebootWindowEnd { get; init; } = ConfigTemplates.MaintenanceHours.End;
     public override string ToString() => "Installer configuration (private values omitted)";
 }
 public record InstallationStep(string Name, bool ChangesRouter);

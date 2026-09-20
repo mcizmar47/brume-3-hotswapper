@@ -19,7 +19,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
     public async Task<InstallationResult> InstallAsync(InstallationPlan plan, IProgress<string> progress, CancellationToken ct)
     {
         var c = plan.Configuration;
-        progress.Report("Validating router, VPN ownership and kill switchâ€¦");
+        progress.Report("Validating router, VPN ownership and kill switch…");
         var fresh = await inspection.InspectAsync(c, ct);
         c = c with { Router = fresh.Router };
         plan = DeploymentPlanning.Create(c, fresh);
@@ -117,7 +117,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
         {
             bool rollbackOk = true;
             using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-            progress.Report("Installation did not finish. Restoring changes made by this attemptâ€¦");
+            progress.Report("Installation did not finish. Restoring changes made by this attempt…");
             try
             {
                 if (staged)

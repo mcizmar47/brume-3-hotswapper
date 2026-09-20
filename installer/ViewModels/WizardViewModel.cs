@@ -49,7 +49,7 @@ public sealed class WizardViewModel : Observable, IDisposable
     public string ModeLabel => Demo ? "DEMO · no network or router changes" : "";
     public bool Acknowledged { get => acknowledged; set { Set(ref acknowledged, value); Refresh(); } }
     public bool Notifications { get => notifications; set { Set(ref notifications, value); Refresh(); } }
-    private int rebootWindowStart = 3, rebootWindowEnd = 14;
+    private int rebootWindowStart = ConfigTemplates.MaintenanceHours.Start, rebootWindowEnd = ConfigTemplates.MaintenanceHours.End;
     public string[] Hours { get; } = Enumerable.Range(0, 24).Select(h => $"{h:00}:00").ToArray();
     public int RebootWindowStart { get => rebootWindowStart; set => Set(ref rebootWindowStart, value); }
     public int RebootWindowEnd { get => rebootWindowEnd; set => Set(ref rebootWindowEnd, value); }

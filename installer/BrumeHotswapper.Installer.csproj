@@ -14,7 +14,7 @@
     <Page Remove="tests/**" />
     <None Remove="tests/**" />
     <PackageReference Include="SSH.NET" Version="2026.0.0" />
-    <Content Include="../hotswapper-main.sh;../hotswapper-supervisor.sh;../hotswapper-housekeeping.sh;../firmware/install-gl-guard.sh;../firmware/gl-coordination.sh;../firmware/gl-patches.awk;../firmware/gl-targets.tsv">
+    <Content Include="../config/hotswapper.conf;../config/housekeeping.conf;../config/hotswapper-locations.tsv;../config/reboot-guards.tsv;../hotswapper-main.sh;../hotswapper-supervisor.sh;../hotswapper-housekeeping.sh;../firmware/install-gl-guard.sh;../firmware/gl-coordination.sh;../firmware/gl-patches.awk;../firmware/gl-targets.tsv">
       <Link>RouterAssets/%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
