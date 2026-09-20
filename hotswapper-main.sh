@@ -330,6 +330,8 @@ fast_health_pass() {
             FAST_FAILURES=0; DETECT_FAILED=0
             rm -f "$LAST_UPTIER_FILE" "$WAN_STATE_FILE"
             break
+        else
+            [ "$?" != 2 ] || break
         fi
     done
     IN_DETECTOR=0
@@ -1026,12 +1028,17 @@ readiness_fresh() {
     [ "${2:-}" = cached ] || { owned_hard_up "$iface" && prepared_dataplane_matches "$iface"; }
 }
 
-candidate_ready() {
-    local token
-    readiness_fresh "$1" cached && return 0
-    token=$(readiness_token "$1") || return 1
-    owned_hard_up "$1" || return 1
-    fast_path_round "$1" && record_readiness "$1" "$token"
+# Probe timestamps describe recent health; they are not permission to promote.
+candidate_structurally_ready() {
+    local iface="$1" expected="$2" token="$3" peer group tunnel generation index key
+    hs_owned "$iface" && owned_hard_up "$iface" || return 1
+    [ -n "$token" ] && [ "$token" = "$(readiness_token "$iface")" ] || return 1
+    read -r peer group tunnel generation index < "$HS_DIR/owned.$iface" || return 1
+    [ "$peer" = "$expected" ] && [ ! -e "$HS_DIR/invalid.$iface.$generation" ] || return 1
+    key=$(uci -q get "wireguard.peer_$peer.public_key")
+    [ -n "$key" ] && [ "$key" = "$(wg show "$iface" peers 2>/dev/null)" ] || return 1
+    prepared_dataplane_matches "$iface" &&
+        fastpath_verify_kernel "$iface" "$(fastpath_mark_for_iface "$iface")"
 }
 
 refresh_standby_health() {
@@ -1187,12 +1194,16 @@ fastpath_rollback() {
 
 promote_iface() {
     local PROMOTION_CRITICAL=1
-    local iface="$1" peer="$2" reason="$3" sec mark old_peer old_tier new_tier title body trace_start trace_ready trace_flip
+    local iface="$1" peer="$2" reason="$3" sec mark old_peer old_tier new_tier title body trace_start trace_ready trace_flip token
     [ "$DEBUG_TIMING" != 1 ] || trace_start=$(monotonic_ms)
-    candidate_ready "$iface" || return 1
+    if [ "$reason" = current-failure-hot-candidate ]; then
+        [ "$iface" != "$DETECT_CURRENT" ] && [ "$iface" != "$(current_iface)" ] || return 1
+    fi
+    token=$(readiness_token "$iface") || return 1
+    candidate_structurally_ready "$iface" "$peer" "$token" || return 1
     acquire_gl_guard || return 1
     # Revalidate after waiting: neither a slot name nor an old successful probe is enough.
-    if ! readiness_fresh "$iface" || [ "$(iface_peer "$iface")" != "$peer" ]; then
+    if ! candidate_structurally_ready "$iface" "$peer" "$token"; then
         release_gl_guard
         return 1
     fi
@@ -1202,10 +1213,11 @@ promote_iface() {
     [ "$DEBUG_TIMING" != 1 ] || trace_ready=$(monotonic_ms)
     if ! fastpath_install_mark_override "$mark"; then release_gl_guard; return 1; fi
     [ "$DEBUG_TIMING" != 1 ] || trace_flip=$(monotonic_ms)
-    if ! synchronize_gl "$sec" "$iface" "$peer" "$mark" || ! fastpath_verify_consistency "$iface" "$peer" "$mark" "$sec"; then
+    if ! synchronize_gl "$sec" "$iface" "$peer" "$mark" || ! fastpath_verify_consistency "$iface" "$peer" "$mark" "$sec" || ! fast_path_round "$iface"; then
         fastpath_rollback "$iface"
         release_gl_guard
-        return 1
+        # Tell hot-candidate callers to stop here and enter slow recovery.
+        return 2
     fi
     release_gl_guard
     if [ "$DEBUG_TIMING" = 1 ]; then
@@ -1314,16 +1326,19 @@ ensure_downtier() {
 promote_hot_candidate() {
     local current="$1" cp="$2" cr="$3" ct="$4" down="$5" up="$6" candidate peer
     for candidate in "$up" "$down"; do
-        [ -n "$candidate" ] || continue
+        [ -n "$candidate" ] && [ "$candidate" != "$current" ] || continue
         peer="$(iface_peer "$candidate")"
-        promote_iface "$candidate" "$peer" current-failure-hot-candidate && return 0
+        promote_iface "$candidate" "$peer" current-failure-hot-candidate
+        case "$?" in 0) return 0;; 2) return 1;; esac
     done
     # If a previous flip left metadata incomplete, a new successful path check
     # may recover that selection. Never reopen DROP just because the device is up.
     if iptables -w 1 -t mangle -C HOTSWAPPER_SELECTED -j DROP >/dev/null 2>&1; then
         rm -f "$HS_DIR/readiness.$current"
         peer=$(iface_peer "$current")
-        promote_iface "$current" "$peer" consistency-recovery && return 0
+        # This is slow recovery of the blocked selection, not hot fallback.
+        fast_path_round "$current" &&
+            promote_iface "$current" "$peer" consistency-recovery && return 0
     fi
     return 1
 }

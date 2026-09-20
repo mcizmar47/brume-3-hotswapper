@@ -95,17 +95,45 @@ hs_worker_allowed 99 wgclient5 || exit 12
 exit 0
 """,['hs_owned','hs_tunnel_owned','hs_worker_allowed'])
 
-    def test_fresh_skips_probe_and_stale_refreshes_once(self):
-        self.shell(['readiness_token','readiness_fresh','record_readiness','candidate_ready'],r"""
-fast_path_round() { echo probe >> probes; return 0; }
-echo '22:7:12:0 2 9000' > readiness.wgclient2
-candidate_ready wgclient2 || exit 10
-[ ! -f probes ] || exit 11
-echo '22:7:12:0 2 1000' > readiness.wgclient2
-candidate_ready wgclient2 || exit 12
-[ "$(wc -l < probes)" = 1 ] || exit 13
-candidate_ready wgclient2 || exit 14
-[ "$(wc -l < probes)" = 1 ] || exit 15
+    def test_stale_readiness_is_advisory_and_structural_changes_block(self):
+        self.shell(['readiness_token','candidate_structurally_ready'],r"""
+hs_owned() { return 0; }
+fastpath_verify_kernel() { return 0; }
+fastpath_mark_for_iface() { echo 0x2000; }
+fast_path_round() { exit 91; }
+probe_iface_path() { exit 92; }
+iface_healthy() { exit 93; }
+echo '22:7:12:0 2 1' > readiness.wgclient2
+token=$(readiness_token wgclient2)
+candidate_structurally_ready wgclient2 22 "$token" || exit 10
+rm readiness.wgclient2
+candidate_structurally_ready wgclient2 22 "$token" || exit 11
+candidate_structurally_ready wgclient2 23 "$token" && exit 12
+touch unprepared
+candidate_structurally_ready wgclient2 22 "$token" && exit 13
+rm unprepared
+echo '22 9 4 8 12' > owned.wgclient2
+candidate_structurally_ready wgclient2 22 "$token" && exit 14
+echo '22 9 4 7 13' > owned.wgclient2
+candidate_structurally_ready wgclient2 22 "$token" && exit 15
+echo '22 9 4 7 12' > owned.wgclient2
+touch invalid.wgclient2.7
+candidate_structurally_ready wgclient2 22 "$token" && exit 16
+rm invalid.wgclient2.7
+wg() { echo wrong-key; }
+candidate_structurally_ready wgclient2 22 "$token" && exit 17
+exit 0
+""")
+
+    def test_background_standby_still_probes(self):
+        self.shell(['refresh_standby_health'],r"""
+DETECTOR_NOW=10000; NEXT_STANDBY_CHECK=0; STANDBY_CHECK_MS=4000
+DETECT_UP=wgclient2; DETECT_DOWN=""
+readiness_token() { echo token; }
+fast_path_round() { echo probe > probed; }
+record_readiness() { echo recorded > recorded; }
+refresh_standby_health
+[ -f probed ] && [ -f recorded ] && [ "$NEXT_STANDBY_CHECK" = 14000 ]
 """)
 
     def test_inflight_probe_cannot_certify_new_generation_or_firewall(self):
@@ -174,8 +202,11 @@ fast-entered' ] || exit 11
 
     def test_flip_order_and_failed_verification_drop(self):
         self.shell(['promote_iface','fastpath_rollback'],r"""
-candidate_ready() { echo ready >> order; }
-readiness_fresh() { echo fresh >> order; }
+readiness_token() { echo token; }
+candidate_structurally_ready() { echo structural >> order; }
+fast_path_round() { [ -f flipped ] || exit 91; echo probe >> order; [ ! -f path-fail ]; }
+probe_iface_path() { exit 92; }
+iface_healthy() { exit 93; }
 acquire_gl_guard() { echo lock >> order; }
 release_gl_guard() { echo unlock >> order; }
 iface_peer() { echo 22; }
@@ -183,7 +214,7 @@ policy_section() { echo selected; }
 fastpath_mark_for_iface() { echo 0x2000; }
 peer_tier() { echo 2; }
 uci() { echo 11; }
-fastpath_install_mark_override() { echo flip >> order; }
+fastpath_install_mark_override() { touch flipped; echo flip >> order; }
 synchronize_gl() { echo synchronize >> order; }
 fastpath_verify_consistency() { echo verify >> order; [ ! -f fail ]; }
 iptables() { echo "$*" >> drop; }
@@ -191,18 +222,60 @@ notify() { exit 91; }
 log() { :; }
 PROMOTION_EPOCH=0
 promote_iface wgclient2 22 failure || exit 10
-[ "$(cat order)" = 'ready
+[ "$(cat order)" = 'structural
 lock
-fresh
+structural
 flip
 synchronize
 verify
+probe
 unlock' ] || exit 11
 touch fail
 promote_iface wgclient2 22 failure && exit 12
 grep -q -- '-R HOTSWAPPER_SELECTED 1 -j DROP' drop || exit 13
 [ "$DETECT_FAILED:$SLOW_REQUESTED" = 1:1 ] || exit 14
+rm fail; touch path-fail
+promote_iface wgclient2 22 failure
+[ "$?" = 2 ] || exit 15
+[ "$(grep -c -- '-R HOTSWAPPER_SELECTED 1 -j DROP' drop)" = 2 ] || exit 16
 exit 0
+""")
+
+    def test_hot_priority_and_failed_flip_stops_attempts(self):
+        self.shell(['promote_hot_candidate'],r"""
+iface_peer() { echo 22; }
+iptables() { echo restored-old >> attempts; return 0; }
+promote_iface() { echo "$1" >> attempts; return "$rc"; }
+rc=0
+promote_hot_candidate wgclient1 11 1 1 wgclient3 wgclient2 || exit 10
+[ "$(cat attempts)" = wgclient2 ] || exit 11
+rm attempts
+rc=2
+promote_hot_candidate wgclient1 11 1 1 wgclient3 wgclient2 && exit 12
+[ "$(cat attempts)" = wgclient2 ] || exit 13
+rm attempts
+promote_iface() { echo "$1" >> attempts; [ "$1" = wgclient3 ]; }
+promote_hot_candidate wgclient1 11 1 1 wgclient3 wgclient2 || exit 14
+[ "$(cat attempts)" = 'wgclient2
+wgclient3' ] || exit 15
+rm attempts
+iptables() { return 0; }
+fast_path_round() { return 1; }
+promote_hot_candidate wgclient1 11 1 1 "" "" && exit 16
+[ ! -f attempts ] || exit 17
+""")
+
+    def test_lock_wait_revalidates_identity_before_flip(self):
+        self.shell(['promote_iface','candidate_structurally_ready','readiness_token'],r"""
+hs_owned() { return 0; }
+fastpath_verify_kernel() { return 0; }
+fastpath_mark_for_iface() { echo 0x2000; }
+acquire_gl_guard() { echo '22 9 4 8 12' > owned.wgclient2; }
+release_gl_guard() { touch released; }
+fastpath_install_mark_override() { exit 91; }
+fast_path_round() { exit 92; }
+promote_iface wgclient2 22 failure && exit 10
+[ -f released ] || exit 11
 """)
 
     def test_dns_preparation_applies_only_its_five_rules(self):
@@ -272,7 +345,7 @@ grep -q -- '-A TUNNEL8_LOCAL_POLICY.*--set-xmark 0x2000/0xf000' restored || exit
     def test_hot_path_has_no_rebuild_or_slow_probe(self):
         body=function('promote_iface')
         for command in ['probe_iface_path','iface_healthy','fast_path_round','setup_instance','rtp2','prepare_dataplane']:
-            self.assertNotIn(command,body)
+            self.assertNotIn(command, body.split('fastpath_install_mark_override')[0] if command == 'fast_path_round' else body)
         self.assertEqual(body.count('fastpath_install_mark_override'),1)
         self.assertIn('gl_process_vpn gl_process',function('synchronize_gl'))
         self.assertIn('/proc/dns_mark/rule',function('synchronize_gl'))
