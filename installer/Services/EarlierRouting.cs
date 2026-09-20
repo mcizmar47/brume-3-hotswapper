@@ -43,7 +43,9 @@ public static class EarlierRouting
                 if (CanonicalTable(tableField.Success ? tableField.Groups[1].Value : "main") != table) continue;
                 string clean = Regex.Replace(route.Trim(), @"\s+table [\w-]+", "");
                 if (Regex.IsMatch(clean, @"^(blackhole|unreachable|prohibit) ")) continue;
-                if (Regex.IsMatch(clean, @"^(local|broadcast) ") && !Regex.IsMatch(clean, @"\b(via|nexthop|encap)\b")) continue;
+                if (Regex.IsMatch(clean, @"^local ") && !Regex.IsMatch(clean, @"\b(via|nexthop|encap)\b")) continue;
+                if (table == "local" && Regex.IsMatch(clean, @"^broadcast \S+ dev [\w.-]+ proto kernel scope link(?: |$)") &&
+                    !Regex.IsMatch(clean, @"\b(via|nexthop|encap)\b")) continue;
                 var destination = clean.Split(' ')[0];
                 int prefix = Prefix(destination);
                 if (prefix < 0) throw Unsupported();

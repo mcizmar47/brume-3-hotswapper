@@ -79,6 +79,7 @@ public class RuntimeValidationTests
             Commands.Add(command);
             if(command==HotswapRuntime.ScanCommand)return Task.FromResult(samples[Math.Min(Reads++,samples.Length-1)]);
             if(command==HotswapRuntime.PidCommand)return Task.FromResult("10");
+            if(command==HotswapRuntime.LockCommand)return Task.FromResult("");
             if(command.Contains("kill -TERM")||command.StartsWith("test ! -L /tmp/hotswapper/supervisor-start"))return Task.FromResult("");
             throw new Exception("Unexpected command");
         }

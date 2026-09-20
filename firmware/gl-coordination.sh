@@ -2,6 +2,22 @@
 # Shared by the watchdog and the few GL writers which touch its slots.
 HS_DIR=${HS_DIR:-/tmp/hotswapper}
 HS_PROC=${HS_PROC:-/proc}
+# Firmware children must not keep the daemon's lifetime lock alive.
+exec 8>&-
+# Key-up carries a slot name, not its original generation. At least reject a
+# slot change between this handler starting and obtaining the mutation lock.
+HS_KEYUP_SLOT=""
+case "${ACTION:-}:${ifname:-}" in
+    KEYPAIR-CREATED:wgclient[123])
+        HS_KEYUP_SLOT=$ifname
+        HS_KEYUP_IDENTITY=$(cat "$HS_DIR/owned.$ifname" 2>/dev/null)
+        ;;
+esac
+
+hs_event_still_current() {
+    [ -z "$HS_KEYUP_SLOT" ] ||
+        [ "$HS_KEYUP_IDENTITY" = "$(cat "$HS_DIR/owned.$HS_KEYUP_SLOT" 2>/dev/null)" ]
+}
 
 hs_daemon_alive() {
     local pid stamp actual
@@ -11,6 +27,17 @@ hs_daemon_alive() {
     [ -r "$HS_PROC/$pid/stat" ] || return 1
     actual=$(awk '{print $22}' "$HS_PROC/$pid/stat")
     [ "$actual" = "$stamp" ] && kill -0 "$pid" 2>/dev/null
+}
+
+hs_daemon_lock_held() {
+    local pid stamp
+    hs_daemon_alive || return 1
+    read -r pid stamp < "$HS_DIR/owner" || return 1
+    [ "$(cat "$HS_DIR/lock/pid" 2>/dev/null)" = "$pid" ] || return 1
+    [ "$(readlink "$HS_PROC/$pid/fd/8")" = "$HS_DIR/daemon.lock" ] || return 1
+    # flock's short-lived applet may be recorded as the acquisition PID. The
+    # lock on this owner's open descriptor, not that applet PID, is authoritative.
+    awk '$1=="lock:" && $3=="FLOCK" && $5=="WRITE" {held=1} END {exit !held}' "$HS_PROC/$pid/fdinfo/8"
 }
 
 hs_owned() {
@@ -78,12 +105,16 @@ hs_invalidate_all() {
 hs_lock() {
     local priority="${1:-slow}" tries=0
     # Nested synchronous firmware helpers inherit the same open file description.
-    [ "${HS_LOCKED:-0}" = 1 ] && [ -e "$HS_PROC/self/fd/9" ] && return 0
+    if [ "${HS_LOCKED:-0}" = 1 ] && [ -e "$HS_PROC/self/fd/9" ]; then
+        hs_event_still_current
+        return $?
+    fi
     mkdir -p "$HS_DIR" || return 1
     exec 9>"$HS_DIR/mutation.lock" || return 1
     while :; do
         if { [ "$priority" = fast ] || [ ! -e "$HS_DIR/promotion-waiting" ]; } && busybox flock -n 9; then
             HS_LOCKED=1; HS_LOCK_OWNER=$$; export HS_LOCKED HS_LOCK_OWNER
+            hs_event_still_current || { hs_unlock; return 1; }
             return 0
         fi
         tries=$((tries + 1))
@@ -211,6 +242,7 @@ hs_peer_matches() {
 case "$0" in
     */gl-coordination.sh)
         case "${1:-}" in
+            daemon) hs_daemon_lock_held;;
             owned) hs_owned "$2" "${3:-}";;
             event) hs_event "$2" "${3:-}";;
             *) exit 2;;

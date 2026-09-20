@@ -40,7 +40,7 @@ public class RouterInspectionTests
         }
     }
     [Theory][InlineData("0")][InlineData("1")]
-    public async Task ExistingChoiceAndUnrelatedRoutingAreSupported(string setting)
+    public async Task ExistingChoiceAndVerifiedLocalRoutingAreSupported(string setting)
     {
         var router = new Fixture(setting);
         await new KillSwitchVerifier().VerifyAsync(router,"vpn",default);
@@ -80,6 +80,7 @@ public class RouterInspectionTests
     }
     private sealed class TransactionFixture(InstallerFixture.RouterFixture inner,string setting):IRouterTransport
     {
+        public Task<IAsyncDisposable> AcquireInstallerLockAsync(CancellationToken ct)=>inner.AcquireInstallerLockAsync(ct);
         public bool Conflict,Ipv6;
         public Task UploadAsync(string p,string s,CancellationToken ct)=>inner.UploadAsync(p,s,ct);
         public Task<string> ExecuteAsync(string c,CancellationToken ct)
@@ -121,6 +122,8 @@ public class RouterInspectionTests
                 "uci -q get route_policy.vpn.mark"=>"0x2000",
                 "uci -q get route_policy.vpn.via"=>"wgclient2",
                 "ip -4 rule show"=>"1: from all iif lo lookup 16800\n800: from all lookup 9910 suppress_prefixlength 0\n6000: from all fwmark 0x2000/0xf000 lookup "+Table,
+                "ip -4 route show table all"=>"192.0.2.0/24 dev lan-test table 9910 proto kernel scope link src 192.0.2.1",
+                "ubus call network.interface.lan status"=>"{\"up\":true,\"l3_device\":\"lan-test\",\"ipv4-address\":[{\"address\":\"192.0.2.1\",\"mask\":24}]}",
                 "ip -4 route show table 1002" or "ip -4 route show table 1003"=>Routes,
                 "iptables -w -t mangle -S TUNNEL42_ROUTE_POLICY" when setting=="1"=>Firewall,
                 var x when x.StartsWith("iptables -w -t mangle -C") && setting=="1"=>"",
@@ -172,6 +175,7 @@ public class RouterInspectionTests
     }
     private sealed class Intercept(IRouterTransport inner) : IRouterTransport
     {
+        public Task<IAsyncDisposable> AcquireInstallerLockAsync(CancellationToken ct)=>inner.AcquireInstallerLockAsync(ct);
         public Func<string, string?>? Read;
         public List<string> Commands = [];
         public async Task<string> ExecuteAsync(string command, CancellationToken ct)

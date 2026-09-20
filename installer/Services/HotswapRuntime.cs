@@ -8,6 +8,7 @@ public sealed class HotswapRuntime(IRouterTransport router, Func<CancellationTok
     public const string MatchFunction = "owned() { tr '\\000' '\\n' < \"$1\" | awk 'NR==1 && ($0==\"/bin/sh\" || $0==\"/bin/ash\" || $0==\"sh\" || $0==\"ash\") {next} {a[++n]=$0} END {if(n==2 && a[1]==\"/root/hotswapper-main.sh\" && (a[2]==\"daemon\" || a[2]==\"run\")) print \"daemon\"; else if(a[1]==\"/root/hotswapper-supervisor.sh\" && (n==1 || (n==2 && a[2]==\"--installer\"))) print \"supervisor\"}'; }";
     public const string ScanCommand = MatchFunction + "; for f in /proc/[0-9]*/cmdline; do [ -r \"$f\" ] || continue; kind=$(owned \"$f\"); [ -n \"$kind\" ] || continue; pid=${f#/proc/}; pid=${pid%/cmdline}; parent=$(awk '/^PPid:/ {print $2}' /proc/$pid/status 2>/dev/null); printf '%s %s %s\\n' \"$pid\" \"$parent\" \"$kind\"; done";
     public const string PidCommand = "if [ -r /tmp/hotswapper/lock/pid ]; then cat /tmp/hotswapper/lock/pid; fi";
+    public const string LockCommand = "/root/hotswapper/gl-coordination.sh daemon";
     public sealed record Process(string Pid,string Parent,string Kind);
     public static IReadOnlyList<Process> Roots(string snapshot)
     {
@@ -28,8 +29,6 @@ public sealed class HotswapRuntime(IRouterTransport router, Func<CancellationTok
         for(int i=0;i<20;i++) {
             var processes=await ReadAsync(ct);
             if(processes.Count==0) { if(++clear==2) {
-                // No owned supervisor remains. Remove only its empty startup mutex, never daemon state.
-                await router.ExecuteAsync("test ! -L /tmp/hotswapper/supervisor-start && { [ ! -d /tmp/hotswapper/supervisor-start ] || rmdir /tmp/hotswapper/supervisor-start; }",ct);
                 return;
             }} else {
                 clear=0;
@@ -39,7 +38,7 @@ public sealed class HotswapRuntime(IRouterTransport router, Func<CancellationTok
         }
         throw new SafeFailure("Owned Hotswapper/supervisor processes did not stop within 10 seconds; no unrelated process or force-kill was used.");
     }
-    public async Task WaitForOneAsync(CancellationToken ct)
+    public async Task WaitForOneAsync(CancellationToken ct, bool requireLifetimeLock = true)
     {
         string previous="";
         for(int i=0;i<20;i++) {
@@ -47,7 +46,10 @@ public sealed class HotswapRuntime(IRouterTransport router, Func<CancellationTok
             var daemons=roots.Where(p=>p.Kind=="daemon").ToArray();
             var owner=(await router.ExecuteAsync(PidCommand,ct)).Trim();
             if(daemons.Length==1 && daemons[0].Pid==owner) {
-                if(previous==owner)return;
+                if(previous==owner) {
+                    if (requireLifetimeLock) await router.ExecuteAsync(LockCommand, ct);
+                    return;
+                }
                 previous=owner;
             } else previous="";
             await Pause(ct);

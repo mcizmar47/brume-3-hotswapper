@@ -26,6 +26,7 @@ class CoordinationTests(unittest.TestCase):
 HS_DIR=.; HS_PROC=./proc; RUNTIME_DIR=.
 GROUP_ID=9; TUNNEL_ID=4; SLOTS="wgclient1 wgclient2 wgclient3"
 hs_lock() { return 0; }
+hs_event_still_current() { return 0; }
 hs_unlock() { :; }
 hs_daemon_alive() { return 0; }
 hs_wake() { echo wake >> wakes; }
@@ -402,6 +403,22 @@ class PatcherTests(unittest.TestCase):
         for name in ['first','second']:
             self.assertEqual((self.root/'usr/bin'/name).read_bytes(),self.stock[name])
         self.assertFalse((self.base/'backups').exists())
+
+    def test_previous_firewall_patch_is_normalized_and_upgraded(self):
+        import hashlib
+        stock = self.stock['first']
+        previous = stock.replace(b'#!/bin/sh\n', b'#!/bin/sh\n. /root/hotswapper/gl-coordination.sh || exit 1\n\ths_lock || return 1\n\ths_invalidate_all\n')
+        old_hash = hashlib.sha256(previous).hexdigest()
+        script = self.assets/'install-gl-guard.sh'
+        script.write_text(re.sub(r'OLD_FIREWALL=[a-f0-9]+', 'OLD_FIREWALL='+old_hash, script.read_text()), newline='\n')
+        catalog = self.assets/'gl-targets.tsv'
+        catalog.write_text(catalog.read_text().replace('first\t', 'firewall\t', 1), newline='\n')
+        (self.root/'usr/bin/first').write_bytes(previous)
+        self.assertEqual(self.run_patch('--check').returncode, 0)
+        result = self.run_patch('--install')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root/'usr/bin/first').read_bytes(), self.patched['first'])
+        self.assertEqual((self.base/'backups'/old_hash).read_bytes(), previous)
 
     def test_bad_output_is_rejected_before_first_replacement(self):
         (self.assets/'gl-patches.awk').write_text('{print}\n')

@@ -65,10 +65,16 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
     private InstallationPlan? reviewedPlan;
     private SshClient? ssh;
     private RouterIdentity? identity;
+    private SshInstallerLock? installerLock;
     private readonly Dictionary<string, string> trusted = [];
     public bool IsDemo => false;
-    public Task<IAsyncDisposable> AcquireInstallerLockAsync(CancellationToken ct) =>
-        ssh?.IsConnected == true ? SshInstallerLock.AcquireAsync(ssh, ct) : throw new SafeFailure("Reconnect before installing.");
+    public async Task<IAsyncDisposable> AcquireInstallerLockAsync(CancellationToken ct)
+    {
+        if (ssh?.IsConnected != true) throw new SafeFailure("Reconnect before installing.");
+        var held = await SshInstallerLock.AcquireAsync(ssh, ct);
+        installerLock = held;
+        return held;
+    }
     public async Task<RouterIdentity> ConnectAsync(string address, string password, CancellationToken ct)
     {
         if (!IPAddress.TryParse(address, out var ip) || ip.AddressFamily != AddressFamily.InterNetwork)
@@ -105,6 +111,7 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
     }
     public async Task<string> ExecuteAsync(string command, CancellationToken ct)
     {
+        if (installerLock is { IsDisposed: false }) installerLock.EnsureHeld();
         if (ssh?.IsConnected != true) throw new SafeFailure("The SSH session is disconnected. Reconnect to the router.");
         using var cmd = ssh.CreateCommand(command);
         cmd.CommandTimeout = TimeSpan.FromSeconds(command == "/root/hotswapper/install-gl-guard.sh --install" ? 90 : 12);
@@ -143,6 +150,7 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
     }
     public async Task UploadAsync(string path, string content, CancellationToken ct)
     {
+        if (installerLock is { IsDisposed: false }) installerLock.EnsureHeld();
         RequireBrume();
         byte[] bytes = Encoding.UTF8.GetBytes(content);
         try { await (upload ??= new DeploymentUpload(this)).UploadAsync(path, bytes, ct); }
@@ -197,7 +205,7 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
         finally { Array.Clear(copy); }
     }
     private void RequireBrume() { if (identity?.IsBrume != true) throw new SafeFailure("Device verification must identify a GL-MT5000 before continuing."); }
-    public void Dispose() { ssh?.Dispose(); ssh = null; identity = null; reviewedPlan = null; upload = null; }
+    public void Dispose() { ssh?.Dispose(); ssh = null; installerLock = null; identity = null; reviewedPlan = null; upload = null; }
 }
 public static class NtfyService
 {

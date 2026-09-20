@@ -11,10 +11,16 @@ public sealed class SshInstallerLock : IAsyncDisposable
     private readonly SshCommand command;
     private readonly Stream input;
     private readonly Task execution;
+    public bool IsDisposed { get; private set; }
     private SshInstallerLock(SshCommand command, Stream input, Task execution)
     { this.command = command; this.input = input; this.execution = execution; }
 
-    public static async Task<IAsyncDisposable> AcquireAsync(SshClient ssh, CancellationToken ct)
+    public void EnsureHeld()
+    {
+        if (IsDisposed || execution.IsCompleted)
+            throw new SafeFailure("The live installer lock was lost. No further installer commands will be sent; transaction evidence was retained.");
+    }
+    public static async Task<SshInstallerLock> AcquireAsync(SshClient ssh, CancellationToken ct)
     {
         var command = ssh.CreateCommand(Command);
         command.CommandTimeout = Timeout.InfiniteTimeSpan;
@@ -38,9 +44,11 @@ public sealed class SshInstallerLock : IAsyncDisposable
     }
     public async ValueTask DisposeAsync()
     {
+        if (IsDisposed) return;
+        IsDisposed = true;
         input.Dispose();
         try { await execution.WaitAsync(TimeSpan.FromSeconds(5)); }
-        catch { command.CancelAsync(); }
+        catch { try { command.CancelAsync(); } catch { /* SSH may already be closed. */ } }
         finally { command.Dispose(); }
     }
 }

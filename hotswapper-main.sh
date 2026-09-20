@@ -859,24 +859,30 @@ start_ownership() {
         [ "$(peer_rank "$peer")" -gt 0 ] || continue
         claim_slot "$iface" "$peer" || { hs_unlock; return 1; }
     done
+    # Normalize an inherited, partly synchronized selector to DROP before
+    # preparation. Never reopen it just to make adoption succeed.
+    if iptables -w 1 -t mangle -S HOTSWAPPER_SELECTED >/dev/null 2>&1 &&
+        ! fastpath_verify_consistency "$(current_iface)" "$(current_peer)" "$(policy_get mark)" "$(policy_section)"; then
+        fastpath_rollback "$(current_iface)"
+    fi
     hs_unlock
     prepare_dataplane "$(current_iface)" || return 1
     restore_failure_state
 }
 
 restore_failure_state() {
+    hs_lock fast || return 1
     # An inherited DROP must go through recovery, never ordinary adoption.
     if ! fastpath_verify_consistency "$(current_iface)" "$(current_peer)" "$(policy_get mark)" "$(policy_section)"; then
-        hs_lock fast || return 1
         fastpath_rollback "$(current_iface)"
-        hs_unlock
     fi
+    hs_unlock
 }
 
 verify_current() (
     local iface peer mark sec token pid stamp
     hs_lock fast || return 1
-    hs_daemon_alive || return 1
+    hs_daemon_lock_held || return 1
     read -r pid stamp < "$HS_DIR/owner" || return 1
     [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$pid" ] || return 1
     iface=$(current_iface); peer=$(current_peer); mark=$(policy_get mark); sec=$(policy_section)

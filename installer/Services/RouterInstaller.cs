@@ -79,6 +79,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                 var after = Hash(body);
                 if (before.Exists && before.Hash == after && before.Mode == (path.EndsWith(".sh") ? "700" : "600")) continue;
                 changed.Add((before, after)); // Record before mutation, including cancellation races.
+                await RecordChangesAsync(changed, ct);
                 await router.ExecuteAsync($"{Unchanged(before)} && test ! -e {Q(path + ".hotswap-new-" + suffix)} && test ! -L {Q(path + ".hotswap-new-" + suffix)} && cp -p {Q(Stage + "/" + Path.GetFileName(path))} {Q(path + ".hotswap-new-" + suffix)} && mv -f {Q(path + ".hotswap-new-" + suffix)} {Q(path)}", ct);
             }
             step = "Reserve maintenance guard addresses"; progress.Report(step);
@@ -101,6 +102,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             foreach (var before in firmwareChanges)
             {
                 changed.Add((before, FirmwareTargets.Find(before.Path)!.PatchedHash));
+                await RecordChangesAsync(changed, ct);
                 await router.ExecuteAsync(Unchanged(before), ct);
             }
             if (firmwareChanges.Length > 0)
@@ -169,7 +171,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                     if (runtimeStopped && fresh.WatchdogRunning && sameRuntime && rollbackOk)
                     {
                         await router.ExecuteAsync("/root/hotswapper-supervisor.sh --installer", recovery.Token);
-                        await new HotswapRuntime(router).WaitForOneAsync(recovery.Token);
+                        await new HotswapRuntime(router).WaitForOneAsync(recovery.Token, requireLifetimeLock: false);
                         var restoredStatus = await router.ExecuteAsync("/root/hotswapper-main.sh status", recovery.Token);
                         if (!RuntimeValidation.ValidStatus(restoredStatus)) rollbackOk = false;
                     }
@@ -198,6 +200,9 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
         }
     }
     public static string ReservationSection(string mac) => "hotswap_" + mac.Replace(":", "").ToLowerInvariant();
+    private Task RecordChangesAsync(IEnumerable<(FileState Before, string After)> changes, CancellationToken ct) =>
+        router.UploadAsync(Stage + "/changes.tsv", string.Join("\n", changes.Select(c =>
+            $"{c.Before.Path}\t{c.Before.Exists}\t{c.Before.Mode}\t{c.Before.Hash}\t{c.After}")) + "\n", ct);
     private static string Unchanged(FileState before) => before.Exists
         ? $"test ! -L {Q(before.Path)} && test \"$(sha256sum {Q(before.Path)} | awk '{{print $1}}')\" = {Q(before.Hash)} && {FileMetadata.MatchesCommand(before.Path, before.Mode)}"
         : $"test ! -e {Q(before.Path)} && test ! -L {Q(before.Path)}";
@@ -231,16 +236,24 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
                 if (!reservations.Any(s => s.Mac.Equals(r.Mac, StringComparison.OrdinalIgnoreCase) && s.Ip == r.Ip))
                     throw new SafeFailure("A maintenance guard reservation failed validation.");
             }
-            operation = "CURRENT/DOWNTIER/UPTIER state";
+            operation = "CURRENT topology and operational readiness";
             string snapshot = "";
             bool healthy = false;
             for (int i = 0; i < 45; i++)
             {
                 snapshot = await router.ExecuteAsync("if [ -f /tmp/hotswapper/state ]; then cat /tmp/hotswapper/state; fi", ct);
-                if (RuntimeValidation.IsHealthy(snapshot, c)) { healthy = true; break; }
+                if (RuntimeValidation.IsHealthy(snapshot, c))
+                {
+                    try
+                    {
+                        if ((await router.ExecuteAsync("/root/hotswapper-main.sh verify-current", ct)).Trim() == "CURRENT_OK")
+                        { healthy = true; break; }
+                    }
+                    catch (RouterCommandFailure) { /* Preparation or recovery may still be running. */ }
+                }
                 await Task.Delay(2000, ct);
             }
-            if (!healthy) throw new SafeFailure("The Hotswapper did not establish a healthy CURRENT/DOWNTIER/UPTIER topology in time.");
+            if (!healthy) throw new SafeFailure("CURRENT did not establish valid ownership, an open selector and a usable fast path in time.");
             operation = "Hotswapper startup and PID lock";
             await new HotswapRuntime(router).WaitForOneAsync(ct);
             operation = "hotswapper status command";

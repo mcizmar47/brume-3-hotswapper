@@ -21,7 +21,10 @@ check() {
         actual=$(hash "$ROOT$path")
         [ "$actual" = "$patched" ] && continue
         [ "${1:-}" != installed ] || return 1
-        [ "$actual" = "$stock" ] || { [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ] || [ "$id" = firewall ] && [ "$actual" = "$OLD_FIREWALL" ]; } || return 1
+        [ "$actual" = "$stock" ] || {
+            { [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ]; } ||
+                { [ "$id" = firewall ] && [ "$actual" = "$OLD_FIREWALL" ]; }
+        } || return 1
     done < "$CATALOG"
 }
 cleanup() {
@@ -62,7 +65,7 @@ install() {
         actual=$(hash "$ROOT$path")
         [ "$actual" != "$patched" ] || continue
         input="$ROOT$path"
-        if [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ] || [ "$id" = firewall ] && [ "$actual" = "$OLD_FIREWALL" ]; then
+        if [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ]; then
             input="$WORK/rtp.stock"
             awk '
                 $0 == "cmd=\"$1\";shift" {print; after=1; next}

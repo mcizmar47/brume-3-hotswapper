@@ -49,6 +49,7 @@ public class CoordinationDeploymentTests
 
     private sealed class OverrideRead(RouterFixture inner,string command,string value):IRouterTransport
     {
+        public Task<IAsyncDisposable> AcquireInstallerLockAsync(CancellationToken ct)=>inner.AcquireInstallerLockAsync(ct);
         public Task UploadAsync(string path,string body,CancellationToken ct)=>inner.UploadAsync(path,body,ct);
         public Task<string> ExecuteAsync(string request,CancellationToken ct)=>
             request==command?Task.FromResult(value):inner.ExecuteAsync(request,ct);
@@ -56,6 +57,7 @@ public class CoordinationDeploymentTests
 
     private sealed class FailedPatch(RouterFixture inner):IRouterTransport
     {
+        public Task<IAsyncDisposable> AcquireInstallerLockAsync(CancellationToken ct)=>inner.AcquireInstallerLockAsync(ct);
         public Task UploadAsync(string path,string body,CancellationToken ct)=>inner.UploadAsync(path,body,ct);
         public Task<string> ExecuteAsync(string command,CancellationToken ct)
         {

@@ -15,6 +15,20 @@ internal static class InstallerFixture
     }
     internal sealed class RouterFixture : IRouterTransport
     {
+        private bool installerActive;
+        public Task<IAsyncDisposable> AcquireInstallerLockAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            lock (this) {
+                if (installerActive) throw new SafeFailure("Another installer is active.");
+                installerActive = true;
+            }
+            return Task.FromResult<IAsyncDisposable>(new Lease(this));
+        }
+        private sealed class Lease(RouterFixture owner) : IAsyncDisposable
+        {
+            public ValueTask DisposeAsync() { lock (owner) owner.installerActive = false; return ValueTask.CompletedTask; }
+        }
         private static string NormalizePaths(string value) => Regex.Replace(Regex.Replace(value, @"/run-[a-f0-9]{32}", "/run"), @"\.hotswap-(new|restore)-[a-f0-9]{32}", ".hotswap-$1");
         public Dictionary<string,string> Uploads {get;}=[];
         public Dictionary<string,string> Installed {get;}=[];
@@ -58,6 +72,9 @@ internal static class InstallerFixture
             else if(cmd=="uci -q get route_policy.vpn.mark") result="0x1000";
             else if(cmd=="iptables -w -t mangle -S TUNNEL42_ROUTE_POLICY") result="-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j MARK --set-xmark 0x1000/0xf000\n-A TUNNEL42_ROUTE_POLICY -m mark --mark 0x0/0xf000 -j DROP";
             else if(cmd.StartsWith("iptables -w -t mangle -C")) result="";
+            else if(cmd=="ip -4 route show table all") result="local 192.0.2.1 dev br-lan table local proto kernel scope host src 192.0.2.1";
+            else if(cmd=="/root/hotswapper-main.sh verify-current") result="CURRENT_OK";
+            else if(cmd==HotswapRuntime.LockCommand) result="";
             else if(cmd=="ip -4 rule show") result="0: from all lookup local\n6000: from all fwmark 0x1000/0xf000 lookup 1001";
             else if(cmd=="ip -4 route show table 1001") result="default dev wgclient1\nblackhole default metric 254";
             else if(cmd=="uci -q get route_policy.vpn.group_id" || cmd=="uci -q get wireguard.peer_11.group_id") result="7";

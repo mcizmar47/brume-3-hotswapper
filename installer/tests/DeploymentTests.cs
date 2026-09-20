@@ -64,6 +64,7 @@ public class DeploymentTests
     }
     private sealed class RepairRouter(RouterFixture inner):IRouterTransport
     {
+        public Task<IAsyncDisposable> AcquireInstallerLockAsync(CancellationToken ct)=>inner.AcquireInstallerLockAsync(ct);
         public bool PreviousMode;
         public List<string> Commands=[];
         public Task UploadAsync(string p,string s,CancellationToken ct)=>inner.UploadAsync(p,s,ct);
@@ -118,6 +119,7 @@ public class DeploymentTests
     }
     private sealed class Intercept(InstallerFixture.RouterFixture inner):IRouterTransport
     {
+        public Task<IAsyncDisposable> AcquireInstallerLockAsync(CancellationToken ct)=>inner.AcquireInstallerLockAsync(ct);
         public bool Duplicates,FailStatus,FailHandshake;
         public Task UploadAsync(string p,string s,CancellationToken ct)=>inner.UploadAsync(p,s,ct);
         public Task<string> ExecuteAsync(string c,CancellationToken ct) {
