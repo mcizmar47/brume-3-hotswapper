@@ -5,6 +5,8 @@ namespace BrumeHotswapper.Installer.Services;
 
 public interface IRouterTransport
 {
+    Task<IAsyncDisposable> AcquireInstallerLockAsync(CancellationToken ct) =>
+        throw new SafeFailure("This transport cannot hold an installer session lock.");
     Task<string> ExecuteAsync(string command, CancellationToken ct);
     Task UploadAsync(string path, string content, CancellationToken ct);
 }
@@ -37,6 +39,7 @@ public sealed class KillSwitchVerifier : IKillSwitchVerifier
         string table = "100" + active[^1];
         if (selected.Length != 1 || !Regex.IsMatch(selected[0], $@"^\s*\d+:\s+from all fwmark {Regex.Escape(mark)}/0xf000 lookup {table}\s*$"))
             throw new SafeFailure("The selected mark does not uniquely map to the expected CURRENT routing table.");
+        await EarlierRouting.VerifyAsync(router, rules, selected[0], selectedMark, ct);
         var routes = await router.ExecuteAsync($"ip -4 route show table {table}", ct);
         var defaults = routes.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("default ")).ToArray();
         // Unconditional: OFF never waives CURRENT routing correctness.

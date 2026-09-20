@@ -140,16 +140,33 @@ hs_permit() {
 }
 
 hs_drain_old_workers() {
-    local attempt=0 file command busy
+    local attempt=0 file command workers="" pid stamp actual busy
+    # Snapshot workers already executing old code. New patched workers wait on
+    # mutation.lock and must not make this drain wait for its own lock holders.
+    for file in "$HS_PROC"/[0-9]*/cmdline; do
+        [ "$file" != "$HS_PROC/$$/cmdline" ] && [ -r "$file" ] || continue
+        command=$(tr '\000' '\n' < "$file" | awk '
+            NR==1 && ($0=="/bin/sh" || $0=="/bin/ash" || $0=="sh" || $0=="ash" || $0=="/usr/bin/lua" || $0=="lua") {next}
+            {a[++n]=$0}
+            END {
+                if(a[1]=="/etc/rc.common") print a[2];
+                else if(a[1]=="/sbin/hotplug-call") print a[1] " " a[2];
+                else print a[1]
+            }')
+        case "$command" in
+            /usr/bin/rtp2.sh|/usr/bin/setup_instance|/usr/bin/setup_instance_via.lua|/usr/bin/tunnel-switch.sh|/lib/netifd/proto/wgclient.sh|/etc/hotplug.d/wireguard/ifup.sh|/etc/hotplug.d/wireguard/ifdown.sh|/etc/hotplug.d/iface/20-firewall|/etc/hotplug.d/iface/99-vpn-client-tunnel-switch|/etc/init.d/firewall|'/sbin/hotplug-call iface'|'/sbin/hotplug-call wireguard')
+                pid=${file%/cmdline}; pid=${pid##*/}
+                stamp=$(awk '{print $22}' "$HS_PROC/$pid/stat" 2>/dev/null)
+                [ -z "$stamp" ] || workers="$workers $pid:$stamp"
+                ;;
+        esac
+    done
     while [ "$attempt" -lt 60 ]; do
         busy=0
-        for file in "$HS_PROC"/[0-9]*/cmdline; do
-            [ "$file" != "$HS_PROC/$$/cmdline" ] || continue
-            [ -r "$file" ] || continue
-            command=$(tr '\000' ' ' < "$file")
-            case "$command" in
-                *'/usr/bin/rtp2.sh '*|*'/usr/bin/setup_instance '*|*'/usr/bin/setup_instance_via.lua '*|*'/usr/bin/tunnel-switch.sh '*|*'/lib/netifd/proto/wgclient.sh '*|*'/etc/hotplug.d/wireguard/'*|*'/etc/hotplug.d/iface/20-firewall '*|*'/etc/init.d/firewall '*) busy=1;;
-            esac
+        for command in $workers; do
+            pid=${command%:*}; stamp=${command#*:}
+            actual=$(awk '{print $22}' "$HS_PROC/$pid/stat" 2>/dev/null)
+            [ "$actual" != "$stamp" ] || busy=1
         done
         [ "$busy" = 1 ] || return 0
         busybox usleep 500000 || return 1

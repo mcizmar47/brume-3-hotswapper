@@ -95,7 +95,7 @@ BEGIN {
     }
     if (target == "firewall") {
         anchor[1] = "QUIET=\"\""
-        replacement[1] = "QUIET=\"\"\n. /root/hotswapper/gl-coordination.sh || exit 1"
+        replacement[1] = "QUIET=\"\"\n. /root/hotswapper/gl-coordination.sh || exit 1\n# rc.common sources this before acquiring the procd service lock.\ncase \"$action\" in\n    start|stop|restart|reload|boot|shutdown) hs_lock || exit 1;;\nesac"
         anchor[2] = "\tfw3 restart"
         replacement[2] = "\ths_lock || return 1\n\ths_invalidate_all\n\tfw3 restart"
         anchor[3] = "\tfw3 ${QUIET} start"

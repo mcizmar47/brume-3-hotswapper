@@ -5,7 +5,8 @@ namespace BrumeHotswapper.Installer.Core;
 public sealed record FirmwareTarget(string Id, string Path, string StockHash, string PatchedHash)
 {
     public bool Supports(string hash) => hash == StockHash || hash == PatchedHash ||
-        (Id == "rtp" && hash == CompatibilityCatalog.PreviousGuardHash);
+        (Id == "rtp" && hash == CompatibilityCatalog.PreviousGuardHash) ||
+        (Id == "firewall" && hash == "7994c173df797620dc1f31ffef593dc43db70982da10c2f190f98e6cf89875db");
 }
 
 public static class FirmwareTargets

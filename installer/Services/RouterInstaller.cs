@@ -18,6 +18,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
 
     public async Task<InstallationResult> InstallAsync(InstallationPlan plan, IProgress<string> progress, CancellationToken ct)
     {
+        await using var installerLock = await router.AcquireInstallerLockAsync(ct);
         var c = plan.Configuration;
         progress.Report("Validating router, VPN ownership and kill switch…");
         var fresh = await inspection.InspectAsync(c, ct);
@@ -36,12 +37,13 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             content[(name.StartsWith("hotswapper-") ? "/root/" : "/root/hotswapper/") + name] = (await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "RouterAssets", name), ct)).Replace("\r\n", "\n");
         var changed = new List<(FileState Before, string After)>();
         var created = new List<ReservationChange>();
-        bool staged = false, cronChanged = false, runtimeStopped = false, started = false;
+        bool staged = false, cronChanged = false, runtimeStopped = false, started = false, completed = false;
         string step = "Create protected staging area";
         try
         {
             await router.ExecuteAsync($"test ! -L /root/hotswapper && umask 077 && mkdir -p /root/hotswapper && chmod 700 /root/hotswapper && test ! -L {Home} && test ! -L {Home}/backups && umask 077 && mkdir -p {Home}/backups && chmod 700 {Home} {Home}/backups && mkdir {Stage}", ct);
             staged = true;
+            await router.UploadAsync(Stage + "/transaction", "started\n", ct);
             step = "Upload and validate payloads"; progress.Report(step);
             foreach (var (path, body) in content)
             {
@@ -111,6 +113,7 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             await router.ExecuteAsync("rm -f /tmp/hotswapper/state && /root/hotswapper-supervisor.sh --installer", ct);
             step = "Validate installed runtime"; progress.Report(step);
             var checks = await ValidateAsync(plan, content, ct);
+            completed = true;
             return new(true, checks);
         }
         catch (Exception failure)
@@ -187,7 +190,8 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             try {
                 string temporary = string.Join(" ", content.Keys.Concat(FirmwareTargets.All.Select(t => t.Path)).SelectMany(p => new[]{Q(p+".hotswap-new-"+suffix),Q(p+".hotswap-restore-"+suffix)}));
-                await router.ExecuteAsync($"rm -f {temporary}; test ! -L /root/hotswapper && umask 077 && mkdir -p /root/hotswapper && chmod 700 /root/hotswapper && test ! -L {Home} && test ! -L {Stage} && rm -rf {Stage}", cleanup.Token);
+                if (staged && !completed) await router.UploadAsync(Stage + "/transaction", "unfinished; rollback attempted; inspect backups and live state before retry\n", cleanup.Token);
+                await router.ExecuteAsync($"rm -f {temporary}; test ! -L /root/hotswapper && umask 077 && mkdir -p /root/hotswapper && chmod 700 /root/hotswapper && test ! -L {Home} && test ! -L {Stage}" + (completed ? $" && rm -rf {Stage}" : ""), cleanup.Token);
             } catch {
                 progress.Report("WARN: Temporary file cleanup was incomplete. A later installation uses a fresh directory; backups and running state were retained.");
             }
@@ -249,8 +253,8 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             if ((await router.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim() != runtime["current_iface"] ||
                 (await router.ExecuteAsync($"uci -q get route_policy.{policy}.peer_id", ct)).Trim() != runtime["current_peer"])
                 throw new SafeFailure("The route policy and Hotswapper runtime disagree.");
-            operation = "CURRENT and retained candidate ownership";
-            foreach (var role in new[] { "current", "uptier", "downtier" })
+            operation = "CURRENT ownership";
+            foreach (var role in new[] { "current" })
             {
                 if (runtime.GetValueOrDefault(role + "_iface", "") is not { Length: > 0 } iface) continue;
                 string peer = runtime[role + "_peer"];
@@ -271,6 +275,10 @@ public sealed class RouterInstaller(IRouterTransport router, IKillSwitchVerifier
             await Ipv6Compatibility.VerifyAsync(router, ct);
             operation = "selected VPN routing and GL enforcement";
             await killSwitch.VerifyAsync(router, c.Profile.PolicySection, ct);
+            operation = "CURRENT operational dataplane and bounded path probe";
+            if ((await router.ExecuteAsync("/root/hotswapper-main.sh verify-current", ct)).Trim() != "CURRENT_OK")
+                throw new SafeFailure("CURRENT did not pass ownership, selector, routing, process/DNS and fast path validation.");
+            await new HotswapRuntime(router).WaitForOneAsync(ct);
             // A real router-side delivery test is part of the explicitly enabled notification configuration.
             operation = "notification delivery test";
             if (c.Notifications) {

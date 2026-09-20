@@ -156,26 +156,15 @@ release_lock() {
     stop_slow_command
     local pid=""
     [ -f "$LOCK_DIR/pid" ] && pid="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
-    [ "$pid" = "$$" ] && rm -rf "$LOCK_DIR" 2>/dev/null
+    [ "$pid" = "$$" ] && rm -f "$LOCK_DIR/pid" 2>/dev/null
+    exec 8>&-
 }
 
 acquire_lock() {
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-        echo $$ > "$LOCK_DIR/pid"
-        trap 'release_lock' EXIT
-        trap 'release_lock; exit 0' INT TERM
-        return 0
-    fi
-
-    local pid=""
-    [ -f "$LOCK_DIR/pid" ] && pid="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        return 1
-    fi
-
-    # Stale lock left by a crashed/killed process.
-    rm -rf "$LOCK_DIR" 2>/dev/null
-    mkdir "$LOCK_DIR" 2>/dev/null || return 1
+    mkdir -p "$LOCK_DIR" || return 1
+    exec 8>"$RUNTIME_DIR/daemon.lock" || return 1
+    busybox flock -n 8 || { exec 8>&-; return 1; }
+    # PID is discovery metadata only; the open descriptor owns the lock.
     echo $$ > "$LOCK_DIR/pid"
     trap 'release_lock' EXIT
     trap 'release_lock; exit 0' INT TERM
@@ -185,7 +174,7 @@ acquire_lock() {
 # BusyBox applets are build-dependent. Both installer and daemon verify elapsed
 # time, not just command existence. No fractional sleep or whole-second fallback.
 delay_us() {
-    busybox usleep "$1" & DELAY_PID=$!
+    busybox usleep "$1" 8>&- & DELAY_PID=$!
     wait "$DELAY_PID" 2>/dev/null; local rc=$?
     if [ "$WAKE_REQUESTED" = 1 ]; then
         kill "$DELAY_PID" 2>/dev/null || true
@@ -231,7 +220,7 @@ slow_command() {
     fi
     # One owned child command, never another detector or detached worker.
     # The shell owns all promotions; a provider command only prepares an unused slot.
-    "$@" <&0 > "$RUNTIME_DIR/command-output" 2>&1 &
+    "$@" <&0 > "$RUNTIME_DIR/command-output" 2>&1 8>&- &
     SLOW_PID=$!
     while kill -0 "$SLOW_PID" 2>/dev/null; do
         detector_iteration
@@ -250,8 +239,8 @@ cooperative_pause() {
 
 fast_path_round() {
     local iface="$1" first second elapsed=0 result=1
-    ping -n -I "$iface" -c 1 -W 1 -w 1 1.1.1.1 >/dev/null 2>&1 & first=$!
-    ping -n -I "$iface" -c 1 -W 1 -w 1 8.8.8.8 >/dev/null 2>&1 & second=$!
+    ping -n -I "$iface" -c 1 -W 1 -w 1 1.1.1.1 >/dev/null 2>&1 8>&- & first=$!
+    ping -n -I "$iface" -c 1 -W 1 -w 1 8.8.8.8 >/dev/null 2>&1 8>&- & second=$!
     # Check completed children at most four times. A successful reply ends the round.
     while [ "$elapsed" -lt "$FAST_PROBE_WINDOW_US" ]; do
         if [ -n "$first" ] && ! kill -0 "$first" 2>/dev/null; then
@@ -871,8 +860,34 @@ start_ownership() {
         claim_slot "$iface" "$peer" || { hs_unlock; return 1; }
     done
     hs_unlock
-    prepare_dataplane "$(current_iface)"
+    prepare_dataplane "$(current_iface)" || return 1
+    restore_failure_state
 }
+
+restore_failure_state() {
+    # An inherited DROP must go through recovery, never ordinary adoption.
+    if ! fastpath_verify_consistency "$(current_iface)" "$(current_peer)" "$(policy_get mark)" "$(policy_section)"; then
+        hs_lock fast || return 1
+        fastpath_rollback "$(current_iface)"
+        hs_unlock
+    fi
+}
+
+verify_current() (
+    local iface peer mark sec token pid stamp
+    hs_lock fast || return 1
+    hs_daemon_alive || return 1
+    read -r pid stamp < "$HS_DIR/owner" || return 1
+    [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$pid" ] || return 1
+    iface=$(current_iface); peer=$(current_peer); mark=$(policy_get mark); sec=$(policy_section)
+    token=$(readiness_token "$iface") || return 1
+    hs_owned "$iface" && owned_hard_up "$iface" && hs_peer_matches "$iface" || return 1
+    fastpath_verify_consistency "$iface" "$peer" "$mark" "$sec" || return 1
+    fast_path_round "$iface" || return 1
+    [ "$token" = "$(readiness_token "$iface")" ] && hs_peer_matches "$iface" || return 1
+    fastpath_verify_consistency "$iface" "$peer" "$mark" "$sec" || return 1
+    printf 'CURRENT_OK\n'
+)
 
 owned_hard_up() {
     local iface="$1" peer group tunnel generation index actual state link flags route
@@ -2024,6 +2039,7 @@ daemon_loop() {
 }
 
 case "${1:-status}" in
+    verify-current) verify_current; exit $?;;
     _wan_probe) wan_probe_round; exit $?;;
     status)
         show_status

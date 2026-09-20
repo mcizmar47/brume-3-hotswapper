@@ -6,6 +6,7 @@ BACKUPS=${HS_BACKUPS:-/root/hotswapper/firmware-backups}
 CATALOG="$DIR/gl-targets.tsv"
 WORK="${HS_PATCH_WORK:-/tmp}/hotswapper-patch.$$"
 OLD_RTP=5c4b26eebdd3cdb6876b7b5e9f48901d8061b525837c1d879f0d059d856f150c
+OLD_FIREWALL=7994c173df797620dc1f31ffef593dc43db70982da10c2f190f98e6cf89875db
 hash() { sha256sum "$1" | awk '{print $1}'; }
 syntax() {
     case "$1" in
@@ -20,7 +21,7 @@ check() {
         actual=$(hash "$ROOT$path")
         [ "$actual" = "$patched" ] && continue
         [ "${1:-}" != installed ] || return 1
-        [ "$actual" = "$stock" ] || { [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ]; } || return 1
+        [ "$actual" = "$stock" ] || { [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ] || [ "$id" = firewall ] && [ "$actual" = "$OLD_FIREWALL" ]; } || return 1
     done < "$CATALOG"
 }
 cleanup() {
@@ -49,6 +50,7 @@ install() {
         . "$DIR/gl-coordination.sh"
         hs_daemon_alive && { echo 'Stop Hotswapper before changing firmware.' >&2; return 1; }
         hs_lock || return 1
+        hs_drain_old_workers || return 1
     fi
     umask 077
     mkdir "$WORK"
@@ -60,7 +62,7 @@ install() {
         actual=$(hash "$ROOT$path")
         [ "$actual" != "$patched" ] || continue
         input="$ROOT$path"
-        if [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ]; then
+        if [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ] || [ "$id" = firewall ] && [ "$actual" = "$OLD_FIREWALL" ]; then
             input="$WORK/rtp.stock"
             awk '
                 $0 == "cmd=\"$1\";shift" {print; after=1; next}
@@ -69,6 +71,11 @@ install() {
                 skip {if ($0 == "fi") skip=0; next}
                 {after=0; print}
             ' "$ROOT$path" > "$input"
+            [ "$(hash "$input")" = "$stock" ] || return 1
+        fi
+        if [ "$id" = firewall ] && [ "$actual" = "$OLD_FIREWALL" ]; then
+            input="$WORK/firewall.stock"
+            awk '$0 != ". /root/hotswapper/gl-coordination.sh || exit 1" && $0 != "\ths_lock || return 1" && $0 != "\ths_invalidate_all"' "$ROOT$path" > "$input"
             [ "$(hash "$input")" = "$stock" ] || return 1
         fi
         output="$WORK/$id"
@@ -90,6 +97,7 @@ install() {
         mv -f "$ROOT$path.hotswap-new-$$" "$ROOT$path"
         [ "$(hash "$ROOT$path")" = "$patched" ] || return 1
     done < "$WORK/changes"
+    if [ -z "$ROOT" ]; then hs_drain_old_workers || return 1; fi
 }
 case "${1:---check}" in
     --check) check;;

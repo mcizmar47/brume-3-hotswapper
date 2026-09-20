@@ -7,35 +7,23 @@ PID_FILE="$LOCK_DIR/pid"
 TAG="hotswapper-supervisor"
 
 mkdir -p "$RUNTIME_DIR"
-# Serialize supervisor launches. A stale startup lock requires inspection rather
-# than deleting another process's daemon lock during a startup race.
-mkdir "$RUNTIME_DIR/supervisor-start" 2>/dev/null || exit 0
-trap 'rmdir "$RUNTIME_DIR/supervisor-start" 2>/dev/null' EXIT INT TERM
-
-pid_is_our_daemon() {
-    local pid="$1" cmd=""
-    [ -n "$pid" ] || return 1
-    kill -0 "$pid" 2>/dev/null || return 1
-    [ -r "/proc/$pid/cmdline" ] || return 1
-    cmd="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
-    echo "$cmd" | grep -Fq '/root/hotswapper-main.sh' || return 1
-    echo "$cmd" | grep -Fq 'daemon' || return 1
-    return 0
-}
-
-if [ -f "$PID_FILE" ]; then
-    pid="$(cat "$PID_FILE" 2>/dev/null)"
-    if pid_is_our_daemon "$pid"; then
-        exit 0
-    fi
+# Both guards release when their process exits, including SIGKILL.
+exec 7>"$RUNTIME_DIR/supervisor.lock" || exit 1
+busybox flock -n 7 || exit 0
+if [ "${1:-}" != --installer ]; then
+    exec 6>"$RUNTIME_DIR/installer.lock" || exit 1
+    busybox flock -n -s 6 || exit 0
 fi
+exec 8>"$RUNTIME_DIR/daemon.lock" || exit 1
+busybox flock -n 8 || exit 0
+# The daemon acquires its own descriptor. A competing launch simply exits.
+exec 8>&-
 
-# The watchdog owns stale daemon-lock recovery; the supervisor must not delete it.
 logger -t "$TAG" "hotswapper is not running; starting daemon" 2>/dev/null || true
 
 (
     trap '' HUP
     exec "$WATCH" daemon
-) </dev/null >/dev/null 2>&1 &
+) 6>&- 7>&- </dev/null >/dev/null 2>&1 &
 
 exit 0

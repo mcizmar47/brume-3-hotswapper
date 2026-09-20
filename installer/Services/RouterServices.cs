@@ -67,6 +67,8 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
     private RouterIdentity? identity;
     private readonly Dictionary<string, string> trusted = [];
     public bool IsDemo => false;
+    public Task<IAsyncDisposable> AcquireInstallerLockAsync(CancellationToken ct) =>
+        ssh?.IsConnected == true ? SshInstallerLock.AcquireAsync(ssh, ct) : throw new SafeFailure("Reconnect before installing.");
     public async Task<RouterIdentity> ConnectAsync(string address, string password, CancellationToken ct)
     {
         if (!IPAddress.TryParse(address, out var ip) || ip.AddressFamily != AddressFamily.InterNetwork)
@@ -104,7 +106,8 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
     public async Task<string> ExecuteAsync(string command, CancellationToken ct)
     {
         if (ssh?.IsConnected != true) throw new SafeFailure("The SSH session is disconnected. Reconnect to the router.");
-        using var cmd = ssh.CreateCommand(command); cmd.CommandTimeout = TimeSpan.FromSeconds(12);
+        using var cmd = ssh.CreateCommand(command);
+        cmd.CommandTimeout = TimeSpan.FromSeconds(command == "/root/hotswapper/install-gl-guard.sh --install" ? 90 : 12);
         await cmd.ExecuteAsync(ct);
         if (cmd.ExitStatus != 0) throw new RouterCommandFailure(cmd.ExitStatus);
         if (cmd.Result.Length > 512_000) throw new SafeFailure("Router response exceeded the expected size.");
