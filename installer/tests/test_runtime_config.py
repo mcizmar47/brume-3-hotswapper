@@ -38,7 +38,7 @@ class RuntimeConfigTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertNotEqual(0, self.load(CONFIG.replace("DETECTOR_PERIOD_MS=400", "DETECTOR_PERIOD_MS=" + value)))
         self.assertNotEqual(0, self.load(CONFIG.replace("DEBUG_TIMING=0", "DEBUG_TIMING=2")))
-        self.assertNotEqual(0, self.load(CONFIG.replace("READY_MAX_AGE_MS=5000\n", "")))
+        self.assertNotEqual(0, self.load(CONFIG.replace("STANDBY_CHECK_MS=4000\n", "")))
 
 
 if __name__ == "__main__":

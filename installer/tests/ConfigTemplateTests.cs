@@ -16,7 +16,6 @@ public class ConfigTemplateTests
         Assert.Contains("DETECTOR_PERIOD_MS=400\n", template);
         Assert.Contains("FAST_PROBE_WINDOW_US=200000\n", template);
         Assert.Contains("FAST_FAILURE_THRESHOLD=2\n", template);
-        Assert.Contains("READY_MAX_AGE_MS=5000\n", template);
         Assert.Contains("STANDBY_CHECK_MS=4000\n", template);
     }
 

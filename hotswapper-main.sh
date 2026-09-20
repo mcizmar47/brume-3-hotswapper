@@ -60,7 +60,7 @@ PROMOTION_EPOCH=0
 [ -r "$CONFIG_FILE" ] && sh -n "$CONFIG_FILE" || { echo "Missing or malformed runtime configuration" >&2; exit 1; }
 . "$CONFIG_FILE" || exit 1
 # Reject missing, non-decimal and oversized values before shell arithmetic.
-for value in "$LOOP_SECONDS" "$UPTIER_INTERVAL" "$CONNECT_TIMEOUT" "$HANDSHAKE_MAX_AGE" "$DOWNTIER_ATTEMPTS" "$KEEPALIVE_PROBE_INTERVAL" "$KEEPALIVE_PROBE_TIMEOUT" "$PATH_FAILURE_THRESHOLD" "$LOG_MAX_BYTES" "$NORD_BACKOFF_SECONDS" "$DETECTOR_PERIOD_MS" "$FAST_PROBE_WINDOW_US" "$FAST_FAILURE_THRESHOLD" "$READY_MAX_AGE_MS" "$STANDBY_CHECK_MS"; do
+for value in "$LOOP_SECONDS" "$UPTIER_INTERVAL" "$CONNECT_TIMEOUT" "$HANDSHAKE_MAX_AGE" "$DOWNTIER_ATTEMPTS" "$KEEPALIVE_PROBE_INTERVAL" "$KEEPALIVE_PROBE_TIMEOUT" "$PATH_FAILURE_THRESHOLD" "$LOG_MAX_BYTES" "$NORD_BACKOFF_SECONDS" "$DETECTOR_PERIOD_MS" "$FAST_PROBE_WINDOW_US" "$FAST_FAILURE_THRESHOLD" "$STANDBY_CHECK_MS"; do
     case "$value" in ''|0|0*|*[!0-9]*|??????????*) echo "Invalid runtime numeric setting" >&2; exit 1;; esac
 done
 case "$DEBUG_TIMING" in 0|1) ;; *) echo "Invalid DEBUG_TIMING" >&2; exit 1;; esac
@@ -320,7 +320,7 @@ fast_health_pass() {
     fi
     IN_DETECTOR=1
     DETECT_FAILED=1
-    rm -f "$RUNTIME_DIR/ready.$DETECT_CURRENT" "$HS_DIR/readiness.$DETECT_CURRENT"
+    rm -f "$RUNTIME_DIR/ready.$DETECT_CURRENT"
     # Cached roles only: no rank searches, WAN diagnosis or provider work here.
     for candidate in "$DETECT_UP" "$DETECT_DOWN"; do
         [ -n "$candidate" ] && [ "$candidate" != "$DETECT_CURRENT" ] || continue
@@ -601,7 +601,7 @@ teardown_iface() {
     hs_lock || return 1
     [ "$iface" != "$(current_iface)" ] || { hs_unlock; return 1; }
     remove_prepared_firewall "$iface"
-    rm -f "$HS_DIR/owned.$iface" "$HS_DIR/readiness.$iface" "$HS_DIR/reservation.$iface"
+    rm -f "$HS_DIR/owned.$iface" "$HS_DIR/reservation.$iface"
     hs_unlock
     return 0
 }
@@ -841,7 +841,6 @@ claim_slot() (
     printf '%s %s\n' "$generation" "${previous:-none}" > "$HS_DIR/reservation.$iface"
     printf '%s %s %s %s %s\n' "$peer" "$GROUP_ID" "$TUNNEL_ID" "$generation" "$index" > "$HS_DIR/owned.$iface.new"
     mv "$HS_DIR/owned.$iface.new" "$HS_DIR/owned.$iface"
-    rm -f "$HS_DIR/readiness.$iface"
 )
 
 grant_lifecycle() {
@@ -1002,33 +1001,20 @@ readiness_token() {
 }
 
 record_readiness() (
-    local iface="$1" expected="$2" peer group tunnel generation index rank stamp key
+    local iface="$1" expected="$2" peer group tunnel generation index rank key
     hs_lock || return 1
     [ -n "$expected" ] && [ "$expected" = "$(readiness_token "$iface")" ] || return 1
     owned_hard_up "$iface" && prepared_dataplane_matches "$iface" || return 1
     read -r peer group tunnel generation index < "$HS_DIR/owned.$iface" || return 1
     key=$(uci -q get "wireguard.peer_$peer.public_key")
     [ -n "$key" ] && [ "$key" = "$(wg show "$iface" peers 2>/dev/null)" ] || return 1
-    rank=$(peer_rank "$peer"); stamp=$(monotonic_ms)
+    rank=$(peer_rank "$peer")
     [ "$rank" -gt 0 ] || return 1
-    printf '%s %s %s\n' "$expected" "$rank" "$stamp" > "$HS_DIR/readiness.$iface.new"
-    mv "$HS_DIR/readiness.$iface.new" "$HS_DIR/readiness.$iface"
     rm -f "$HS_DIR/invalid.$iface.$generation"
 )
 
-readiness_fresh() {
-    local iface="$1" token rank stamp age peer group tunnel generation index
-    [ -r "$HS_DIR/readiness.$iface" ] || return 1
-    read -r token rank stamp < "$HS_DIR/readiness.$iface" || return 1
-    [ "$token" = "$(readiness_token "$iface")" ] || return 1
-    read -r peer group tunnel generation index < "$HS_DIR/owned.$iface" || return 1
-    [ ! -e "$HS_DIR/invalid.$iface.$generation" ] || return 1
-    age=$(( $(monotonic_ms) - stamp ))
-    [ "$age" -ge 0 ] && [ "$age" -le "$READY_MAX_AGE_MS" ] || return 1
-    [ "${2:-}" = cached ] || { owned_hard_up "$iface" && prepared_dataplane_matches "$iface"; }
-}
 
-# Probe timestamps describe recent health; they are not permission to promote.
+# Promotion checks local structure without an Internet probe.
 candidate_structurally_ready() {
     local iface="$1" expected="$2" token="$3" peer group tunnel generation index key
     hs_owned "$iface" && owned_hard_up "$iface" || return 1
@@ -1051,8 +1037,6 @@ refresh_standby_health() {
         token=$(readiness_token "$iface") || continue
         if owned_hard_up "$iface" && fast_path_round "$iface"; then
             record_readiness "$iface" "$token" || true
-        else
-            rm -f "$HS_DIR/readiness.$iface"
         fi
     done
 }
@@ -1187,7 +1171,6 @@ fastpath_rollback() {
             log "CRITICAL: unable to install emergency selector DROP"
             exit 1
         }
-    rm -f "$HS_DIR/readiness.$1"
     DETECT_FAILED=1
     SLOW_REQUESTED=1
 }
@@ -1334,7 +1317,6 @@ promote_hot_candidate() {
     # If a previous flip left metadata incomplete, a new successful path check
     # may recover that selection. Never reopen DROP just because the device is up.
     if iptables -w 1 -t mangle -C HOTSWAPPER_SELECTED -j DROP >/dev/null 2>&1; then
-        rm -f "$HS_DIR/readiness.$current"
         peer=$(iface_peer "$current")
         # This is slow recovery of the blocked selection, not hot fallback.
         fast_path_round "$current" &&

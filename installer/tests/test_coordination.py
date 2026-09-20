@@ -23,7 +23,7 @@ class CoordinationTests(unittest.TestCase):
     def shell(self, names, code, helpers=()):
         with tempfile.TemporaryDirectory(prefix='hotswapper-test-') as tmp:
             body = "cd '"+Path(tmp).as_posix()+"' || exit 99\n"+r"""
-HS_DIR=.; HS_PROC=./proc; RUNTIME_DIR=.; READY_MAX_AGE_MS=5000
+HS_DIR=.; HS_PROC=./proc; RUNTIME_DIR=.
 GROUP_ID=9; TUNNEL_ID=4; SLOTS="wgclient1 wgclient2 wgclient3"
 hs_lock() { return 0; }
 hs_unlock() { :; }
@@ -95,7 +95,7 @@ hs_worker_allowed 99 wgclient5 || exit 12
 exit 0
 """,['hs_owned','hs_tunnel_owned','hs_worker_allowed'])
 
-    def test_stale_readiness_is_advisory_and_structural_changes_block(self):
+    def test_structural_changes_block_without_probing(self):
         self.shell(['readiness_token','candidate_structurally_ready'],r"""
 hs_owned() { return 0; }
 fastpath_verify_kernel() { return 0; }
@@ -103,11 +103,8 @@ fastpath_mark_for_iface() { echo 0x2000; }
 fast_path_round() { exit 91; }
 probe_iface_path() { exit 92; }
 iface_healthy() { exit 93; }
-echo '22:7:12:0 2 1' > readiness.wgclient2
 token=$(readiness_token wgclient2)
 candidate_structurally_ready wgclient2 22 "$token" || exit 10
-rm readiness.wgclient2
-candidate_structurally_ready wgclient2 22 "$token" || exit 11
 candidate_structurally_ready wgclient2 23 "$token" && exit 12
 touch unprepared
 candidate_structurally_ready wgclient2 22 "$token" && exit 13
@@ -140,24 +137,29 @@ refresh_standby_health
         self.shell(['readiness_token','record_readiness'],r"""
 token=$(readiness_token wgclient2)
 echo '22 9 4 8 12' > owned.wgclient2
+touch invalid.wgclient2.8
 record_readiness wgclient2 "$token" && exit 10
-[ ! -f readiness.wgclient2 ] || exit 11
+[ -f invalid.wgclient2.8 ] || exit 11
 token=$(readiness_token wgclient2)
 echo 1 > dataplane-epoch
 record_readiness wgclient2 "$token" && exit 12
-[ ! -f readiness.wgclient2 ] || exit 13
+[ -f invalid.wgclient2.8 ] || exit 13
 exit 0
 """)
 
-    def test_down_restart_or_unprepared_rejects_cache(self):
-        self.shell(['readiness_token','readiness_fresh'],r"""
-echo '22:7:12:0 2 9000' > readiness.wgclient2
+    def test_successful_probe_clears_only_matching_invalid_marker(self):
+        self.shell(['readiness_token','record_readiness'],r"""
+token=$(readiness_token wgclient2)
+touch invalid.wgclient2.7 invalid.wgclient2.6
 touch down
-readiness_fresh wgclient2 && exit 10
+record_readiness wgclient2 "$token" && exit 10
+[ -f invalid.wgclient2.7 ] || exit 11
 rm down; touch unprepared
-readiness_fresh wgclient2 && exit 11
-rm unprepared; echo '22 9 4 7 13' > owned.wgclient2
-readiness_fresh wgclient2 && exit 12
+record_readiness wgclient2 "$token" && exit 12
+[ -f invalid.wgclient2.7 ] || exit 13
+rm unprepared
+record_readiness wgclient2 "$token" || exit 14
+[ ! -f invalid.wgclient2.7 ] && [ -f invalid.wgclient2.6 ] || exit 15
 exit 0
 """)
 
