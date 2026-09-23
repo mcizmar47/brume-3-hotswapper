@@ -89,12 +89,23 @@ hs_event() (
     hs_wake
 )
 
+# Called under mutation.lock before changing anything an armed slot depends on.
+hs_disarm() {
+    case "$1" in wgclient1|wgclient2|wgclient3)
+        rm -f "$HS_DIR/armed.$1" "$HS_DIR/ready.$1" || return 1
+        [ "${DETECT_UP:-}" != "$1" ] || DETECT_UP=""
+        [ "${DETECT_DOWN:-}" != "$1" ] || DETECT_DOWN=""
+        ;;
+    esac
+}
+
 hs_invalidate_all() {
     local iface peer group tunnel generation index epoch=0
     [ ! -r "$HS_DIR/dataplane-epoch" ] || read -r epoch < "$HS_DIR/dataplane-epoch"
     printf '%s\n' "$((epoch + 1))" > "$HS_DIR/dataplane-epoch.new"
     mv "$HS_DIR/dataplane-epoch.new" "$HS_DIR/dataplane-epoch"
     for iface in wgclient1 wgclient2 wgclient3; do
+        hs_disarm "$iface" || return 1
         [ -r "$HS_DIR/owned.$iface" ] || continue
         read -r peer group tunnel generation index < "$HS_DIR/owned.$iface" || continue
         : > "$HS_DIR/invalid.$iface.$generation"
@@ -167,6 +178,7 @@ hs_permit() {
     read -r peer group tunnel generation index < "$HS_DIR/owned.$iface" || return 1
     permit="$HS_DIR/permit.$iface.$action.$generation"
     [ -f "$permit" ] || return 1
+    hs_disarm "$iface" || return 1
     rm -f "$permit"
 }
 
@@ -222,6 +234,7 @@ hs_ifindex() {
     local iface="$1" peer group tunnel generation previous index
     hs_owned "$iface" || return 1
     read -r peer group tunnel generation previous < "$HS_DIR/owned.$iface" || return 1
+    hs_disarm "$iface" || return 1
     read -r index < "/sys/class/net/$iface/ifindex" || return 1
     printf '%s %s %s %s %s\n' "$peer" "$group" "$tunnel" "$generation" "$index" > "$HS_DIR/owned.$iface.new"
     mv "$HS_DIR/owned.$iface.new" "$HS_DIR/owned.$iface"

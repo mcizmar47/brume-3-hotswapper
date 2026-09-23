@@ -11,12 +11,12 @@ public static class CompatibilityCatalog
     public static readonly HashSet<string> TestedFirmware = ["4.9.0"];
     // Current-layout guard hash reproduced from the archived stock firmware.
     public const string PreviousGuardHash = "5c4b26eebdd3cdb6876b7b5e9f48901d8061b525837c1d879f0d059d856f150c";
-    public const string PatchedHash = "84339bc25c130a0c2b31dae698bae1b224d0fc58074964a0ade37a8b84b060e1";
+    public const string PatchedHash = "cdcbda7302494c4d71e3b674b7d8554eb2002013db5fcc6f9379505e63302a53";
     public static bool IsPatched(string hash) => Classify(hash) is Compatibility.AlreadyPatchedKnownCompatible;
     public static readonly HashSet<string> IncompatibleHashes = new(StringComparer.OrdinalIgnoreCase);
     public static Compatibility Classify(string hash) => IncompatibleHashes.Contains(hash) ? Compatibility.KnownIncompatible
         : hash.Equals(StockHash, StringComparison.OrdinalIgnoreCase) ? Compatibility.StockKnownCompatible
-        : (hash.Equals(PatchedHash, StringComparison.OrdinalIgnoreCase) || hash.Equals(PreviousGuardHash, StringComparison.OrdinalIgnoreCase)) ? Compatibility.AlreadyPatchedKnownCompatible : Compatibility.Unknown;
+        : (hash.Equals(PatchedHash, StringComparison.OrdinalIgnoreCase) || hash.Equals(PreviousGuardHash, StringComparison.OrdinalIgnoreCase) || hash.Equals("84339bc25c130a0c2b31dae698bae1b224d0fc58074964a0ade37a8b84b060e1", StringComparison.OrdinalIgnoreCase)) ? Compatibility.AlreadyPatchedKnownCompatible : Compatibility.Unknown;
 }
 public interface IVpnLocationResolver { IReadOnlyList<VpnLocationGroup> Group(IEnumerable<VpnConnection> peers); }
 // Verified GL 4.9.0 country,city metadata. Identity is scoped to this provider layout,

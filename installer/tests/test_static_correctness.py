@@ -54,6 +54,7 @@ current_iface() { echo wgclient2; }; current_peer() { echo 22; }
 policy_get() { echo 0x2000; }; policy_section() { echo policy; }
 readiness_token() { echo 22:1:2:3; }
 hs_owned() { :; }; owned_hard_up() { :; }; hs_peer_matches() { :; }
+prepared_hooks_match() { :; }
 fastpath_verify_consistency() { [ "$selector" = MARK ]; }
 fast_path_round() { echo probe >> probes; [ "$path" = up ]; }
 selector=DROP; path=up
@@ -101,7 +102,7 @@ exit 0
         entry = json.loads(re.search(r"replacement\[1\] = (.+)", part)[1])
         self.run_shell(FLOCK + r"""
 HS_DIR=.; HS_PROC=/proc; HS_KEYUP_SLOT=""
-""" + function("hs_event_still_current", HELPER) + "\n" + function("hs_lock", HELPER) + "\n" + function("hs_unlock", HELPER) + "\n" + entry.replace('. /root/hotswapper/gl-coordination.sh || exit 1', ':') .replace('QUIET=""', 'action=reload; QUIET=""') + r"""
+""" + function("hs_event_still_current", HELPER) + "\n" + function("hs_lock", HELPER) + "\n" + function("hs_unlock", HELPER) + "\n" + entry.replace('. /root/hotswapper/gl-coordination.sh || exit 1', ':') .replace('QUIET=""', 'action=trace; QUIET=""') + r"""
 [ "$HS_LOCKED" = 1 ] || exit 1
 # rc.common takes this service lock only after sourcing the init script.
 exec 6>service.lock

@@ -7,6 +7,17 @@ CATALOG="$DIR/gl-targets.tsv"
 WORK="${HS_PATCH_WORK:-/tmp}/hotswapper-patch.$$"
 OLD_RTP=5c4b26eebdd3cdb6876b7b5e9f48901d8061b525837c1d879f0d059d856f150c
 OLD_FIREWALL=7994c173df797620dc1f31ffef593dc43db70982da10c2f190f98e6cf89875db
+previous_coordinated() {
+    case "$1:$2" in
+        rtp:84339bc25c130a0c2b31dae698bae1b224d0fc58074964a0ade37a8b84b060e1) return 0;;
+        instances:184793a110dc0c728fa18f5857ea05d3f5efb432b142ac89da50cd8708bc909d) return 0;;
+        setup:0e727b62335ece0338db37b80ec781ca703b203bc1910983713636a8cfee61b5) return 0;;
+        proto:fb6ca0fa6406c13bd68556f3fdcad775c56fe9620330d6878a6172947bae91c6) return 0;;
+        firewall_event:0f9a66e076dfd530c0a1748652442503dc3a0557fed42daab2c59f170d283406) return 0;;
+        firewall:5b4a449f28dbbcf5effa07a61d67376851c7a9db8d29a39b8cef0a82105cda38) return 0;;
+        *) return 1;;
+    esac
+}
 hash() { sha256sum "$1" | awk '{print $1}'; }
 syntax() {
     case "$1" in
@@ -21,7 +32,7 @@ check() {
         actual=$(hash "$ROOT$path")
         [ "$actual" = "$patched" ] && continue
         [ "${1:-}" != installed ] || return 1
-        [ "$actual" = "$stock" ] || {
+        [ "$actual" = "$stock" ] || previous_coordinated "$id" "$actual" || {
             { [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ]; } ||
                 { [ "$id" = firewall ] && [ "$actual" = "$OLD_FIREWALL" ]; }
         } || return 1
@@ -65,6 +76,14 @@ install() {
         actual=$(hash "$ROOT$path")
         [ "$actual" != "$patched" ] || continue
         input="$ROOT$path"
+        if previous_coordinated "$id" "$actual"; then
+            input="$BACKUPS/$stock"
+            if [ ! -f "$input" ] || [ -L "$input" ] || [ "$(hash "$input")" != "$stock" ]; then
+                # Older guard upgrades may have saved guarded bytes, not stock.
+                input="$ROOT/rom$path"
+            fi
+            [ -f "$input" ] && [ ! -L "$input" ] && [ "$(hash "$input")" = "$stock" ] || return 1
+        fi
         if [ "$id" = rtp ] && [ "$actual" = "$OLD_RTP" ]; then
             input="$WORK/rtp.stock"
             awk '
