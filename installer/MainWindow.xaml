@@ -1,4 +1,4 @@
-<Window x:Class="BrumeHotswapper.Installer.MainWindow"
+﻿<Window x:Class="BrumeHotswapper.Installer.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:BrumeHotswapper.Installer"
@@ -63,7 +63,7 @@
       <TextBlock Text="Check hardware and software" Style="{StaticResource SectionHeading}"/>
       <TextBlock Text="This tool is designed for GL.iNet Brume 3 (GL-MT5000)." Margin="0,0,0,7"/>
       <TextBlock Margin="0,0,0,7" TextWrapping="Wrap">
-       <Run Text="Currently verified firmware versions: "/><Run Text="{Binding SupportedVersions}" FontWeight="SemiBold"/>
+       <Run Text="Currently verified firmware versions: "/><Run Text="{Binding SupportedVersions, Mode=OneWay}" FontWeight="SemiBold"/>
       </TextBlock>
       <TextBlock TextWrapping="Wrap">
        <Run Text="If your router is on an older version, update it through the "/>
@@ -112,7 +112,7 @@
        <TextBlock Text="You don't need to sort individual connection preferences in the Admin Panel; Hotswapper uses the tier order you set here." Margin="0,9,0,0" TextWrapping="Wrap"/>
       </StackPanel>
       <StackPanel Visibility="{Binding ShowFirmwareHelp, Converter={StaticResource Bool}}" Margin="0,3,0,20">
-       <TextBlock TextWrapping="Wrap" Margin="0,0,0,8"><Run Text="Verified versions: "/><Run Text="{Binding SupportedVersions}" FontWeight="SemiBold"/></TextBlock>
+       <TextBlock TextWrapping="Wrap" Margin="0,0,0,8"><Run Text="Verified versions: "/><Run Text="{Binding SupportedVersions, Mode=OneWay}" FontWeight="SemiBold"/></TextBlock>
        <TextBlock TextWrapping="Wrap"><Run Text="Update from the "/><Hyperlink NavigateUri="http://192.168.8.1/#/upgrade" RequestNavigate="OpenLink">Admin Panel</Hyperlink><Run Text=" or "/><Hyperlink NavigateUri="https://dl.gl-inet.com/router/mt5000/stable" RequestNavigate="OpenLink">download a compatible firmware image</Hyperlink><Run Text="."/></TextBlock>
       </StackPanel>
       <CheckBox IsChecked="{Binding AcceptUnsupportedFirmware}" Visibility="{Binding ShowFirmwareOverride, Converter={StaticResource Bool}}" Margin="0,15,0,0" Content="I wish to proceed with installation on an unsupported firmware version."/>
@@ -162,7 +162,7 @@
        <TextBox Text="{Binding RebootStartText, UpdateSourceTrigger=PropertyChanged}" Width="48" MaxLength="2" HorizontalContentAlignment="Center" PreviewTextInput="HourInput" DataObject.Pasting="HourPaste"/>
        <TextBlock Text="to" VerticalAlignment="Center" Margin="12,0"/>
        <TextBox Text="{Binding RebootEndText, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding HasGuards}" Width="48" MaxLength="2" HorizontalContentAlignment="Center" PreviewTextInput="HourInput" DataObject.Pasting="HourPaste"/>
-       <Border Style="{StaticResource InfoBubble}" Margin="12,0,0,0" ToolTip="24-hour format: 00–23 (for example, 2 PM = 14). With no protected devices, the router attempts one reboot at the first hour.">
+       <Border Style="{StaticResource InfoBubble}" Margin="12,0,0,0" ToolTip="24-hour format: 00â€“23 (for example, 2 PM = 14). With no protected devices, the router attempts one reboot at the first hour.">
         <TextBlock Text="?" Foreground="#225F77" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
        </Border>
       </StackPanel>
@@ -179,7 +179,7 @@
         </Grid>
         <ItemsControl ItemsSource="{Binding GuardEntries}">
          <ItemsControl.ItemTemplate><DataTemplate><DockPanel LastChildFill="True" Margin="0,0,0,8">
-          <Button DockPanel.Dock="Right" Content="−" ToolTip="Remove this address" Click="RemoveGuard" Tag="{Binding}" Margin="10,0,0,0" Padding="12,4"/>
+          <Button DockPanel.Dock="Right" Content="âˆ’" ToolTip="Remove this address" Click="RemoveGuard" Tag="{Binding}" Margin="10,0,0,0" Padding="12,4"/>
           <TextBox Text="{Binding Address, UpdateSourceTrigger=PropertyChanged}" Padding="9,5"/>
          </DockPanel></DataTemplate></ItemsControl.ItemTemplate>
         </ItemsControl>
@@ -223,3 +223,4 @@
   </Grid>
  </Grid>
 </Window>
+
