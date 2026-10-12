@@ -20,9 +20,18 @@ def patch(target, number):
     return json.loads(re.search(r'replacement\['+str(number)+r'\] = (.*)',part)[1])
 
 class CoordinationTests(unittest.TestCase):
-    def shell(self, names, code, helpers=()):
+    def shell(self, names, code, helpers=(), commands=None):
         with tempfile.TemporaryDirectory(prefix='hotswapper-test-') as tmp:
-            body = "cd '"+Path(tmp).as_posix()+"' || exit 99\n"+r"""
+            body = "cd '"+Path(tmp).as_posix()+"' || exit 99\n"
+            if commands:
+                mock_dir = Path(tmp)/'bin'
+                mock_dir.mkdir()
+                for name, source in commands.items():
+                    mock = mock_dir/name
+                    mock.write_text('#!/bin/sh\n'+source, encoding='utf-8', newline='\n')
+                    mock.chmod(0o755)
+                body += 'PATH=./bin:$PATH; export PATH\n'
+            body += r"""
 HS_DIR=.; HS_PROC=./proc; RUNTIME_DIR=.
 GROUP_ID=9; TUNNEL_ID=4; SLOTS="wgclient1 wgclient2 wgclient3"
 hs_lock() { return 0; }
@@ -337,13 +346,12 @@ iptables() {
         *) return 1;;
     esac
 }
-iptables-restore() { cat > restored; }
 select_dns_mark 0x2000 || exit 9
 synchronize_gl selected wgclient2 22 0x2000 || exit 10
 grep -Fxq 'route_policy.gl_process_vpn.via=wgclient2' changes || exit 11
 grep -q -- '-A TUNNEL8_LOCAL_POLICY.*--set-xmark 0x2000/0xf000' restored || exit 12
 [ "$(cat dns/rule4/mark)" = 0x2000 ] || exit 13
-""")
+""", commands={'iptables-restore': 'cat > restored\n'})
 
     def test_guards_recheck_after_wait(self):
         for target,n in [('rtp',2),('firewall_event',1),('keydown',1)]:
@@ -439,7 +447,6 @@ hs_invalidate_all() { :; }
 fastpath_mark_for_iface() { case "$1" in wgclient1) echo 0x1000;; wgclient2) echo 0x2000;; wgclient3) echo 0x3000;; esac; }
 ip() { case "$*" in '-4 route show dev br-lan scope link') echo '192.0.2.0/24 proto kernel';; *) echo "$*" >> routes;; esac; }
 iptables() { return 0; }
-iptables-restore() { cat > restored; }
 fastpath_prepare_firewall() { :; }; prepare_selector() { :; }
 prepare_dataplane wgclient1 || exit 10
 for n in 1 2 3; do
@@ -448,7 +455,7 @@ done
 grep -Fxq -- '-I FORWARD 1 -j HOTSWAPPER_EGRESS' restored || exit 12
 grep -Fxq -- '-I OUTPUT 1 -j HOTSWAPPER_EGRESS' restored || exit 13
 grep -q -- 'replace blackhole default table 1001 metric 254' routes || exit 14
-""")
+""", commands={'iptables-restore': 'cat > restored\n'})
 
     def test_lifecycle_mutations_disarm_first(self):
         self.assertLess(function('claim_slot').index('hs_disarm'), function('claim_slot').index('owned.$iface.new'))
