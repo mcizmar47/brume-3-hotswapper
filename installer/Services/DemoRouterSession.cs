@@ -13,6 +13,13 @@ public sealed class DemoRouterSession : IRouterSession
             for (int i = 0; i < count; i++) peers.Add(new((id++).ToString(), $"Demo connection {id}", location));
         return Task.FromResult<IReadOnlyList<VpnProfile>>([new("42", "7", peers)]);
     }
+    public Task VerifyActiveProfileAsync(VpnProfile profile, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (profile.TunnelId != "42" || profile.GroupId != "7")
+            throw new SafeFailure("The demo VPN tunnel is not active.");
+        return Task.CompletedTask;
+    }
     public Task<IReadOnlyList<LanClient>> ClientsAsync(CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();

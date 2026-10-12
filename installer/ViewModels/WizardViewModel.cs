@@ -24,7 +24,7 @@ public sealed class GuardIpEntry : Observable
 
 public sealed class WizardViewModel : Observable, IDisposable
 {
-    private enum CompatibilityProblem { None, WrongDevice, MissingVpn, InsufficientLocations, UnreadableFirmware, WrongFirmware, UnknownFiles }
+    private enum CompatibilityProblem { None, WrongDevice, MissingVpn, InsufficientLocations, InactiveVpn, UnreadableFirmware, WrongFirmware, UnknownFiles }
     private static readonly string[] PageTitles = ["Prerequisites", "Connect", "Compatibility", "Configure Tiers", "Tier 1 Recovery", "Installation"];
     private readonly Func<IRouterSession> createSession;
     private readonly DiagnosticLog log = new();
@@ -98,7 +98,7 @@ public sealed class WizardViewModel : Observable, IDisposable
         }
     }
 
-    public bool ShowVpnHelp => Page == 2 && (problem is CompatibilityProblem.MissingVpn or CompatibilityProblem.InsufficientLocations);
+    public bool ShowVpnHelp => Page == 2 && (problem is CompatibilityProblem.MissingVpn or CompatibilityProblem.InsufficientLocations or CompatibilityProblem.InactiveVpn);
     public bool ShowFirmwareHelp => Page == 2 && (problem is CompatibilityProblem.UnreadableFirmware or CompatibilityProblem.WrongFirmware or CompatibilityProblem.UnknownFiles);
     public bool ShowFirmwareOverride => Page == 2 && problem == CompatibilityProblem.WrongFirmware;
     public string CompatibilityHeadline => problem switch
@@ -106,6 +106,7 @@ public sealed class WizardViewModel : Observable, IDisposable
         CompatibilityProblem.WrongDevice => "Cannot verify that this device is a GL.iNet Brume 3 (GL-MT5000).",
         CompatibilityProblem.MissingVpn => "No VPN tunnel profile is set up. Cannot continue.",
         CompatibilityProblem.InsufficientLocations => "None of the VPN tunnels contain two distinct geographic locations.",
+        CompatibilityProblem.InactiveVpn => "No eligible VPN tunnel has a usable active WireGuard slot.",
         CompatibilityProblem.UnreadableFirmware => "The router's firmware version could not be verified.",
         CompatibilityProblem.WrongFirmware => "This firmware version has not been verified.",
         CompatibilityProblem.UnknownFiles => "The router's GL.iNet VPN system files don't match a supported layout.",
@@ -116,6 +117,7 @@ public sealed class WizardViewModel : Observable, IDisposable
         CompatibilityProblem.WrongDevice => $"Detected: {Router?.Model ?? "Unknown device"}. Installation supports GL-MT5000 only.",
         CompatibilityProblem.MissingVpn => "Create a VPN tunnel and add VPN connections to it, then disconnect and reconnect here.",
         CompatibilityProblem.InsufficientLocations => "Add connections to at least two different country/city locations within one VPN tunnel, then reconnect here.",
+        CompatibilityProblem.InactiveVpn => "Activate an eligible VPN tunnel in the VPN Dashboard. If it is already active, check that its WireGuard slots are not used by another VPN policy, then reconnect here.",
         CompatibilityProblem.UnreadableFirmware => "Check the router's firmware information in its Admin Panel, then reconnect. Installation cannot continue without a readable version.",
         CompatibilityProblem.WrongFirmware => $"Detected firmware: {Router?.Firmware ?? "Unknown"}. You can try continuing, but Hotswapper will still reject any unrecognized system-file contents before patching.",
         CompatibilityProblem.UnknownFiles => "The firmware files must match a known stock or previously patched layout. The version override cannot bypass these checks.",
@@ -157,8 +159,9 @@ public sealed class WizardViewModel : Observable, IDisposable
     {
         // Order is intentional. Never replace a wrong-device error with a firmware error.
         problem = Router?.IsBrume != true ? CompatibilityProblem.WrongDevice
-            : EligibleProfiles.Count == 0 && selectedProfile == null && profileCount == 0 ? CompatibilityProblem.MissingVpn
-            : EligibleProfiles.Count == 0 ? CompatibilityProblem.InsufficientLocations
+            : profileCount == 0 ? CompatibilityProblem.MissingVpn
+            : locationProfileCount == 0 ? CompatibilityProblem.InsufficientLocations
+            : EligibleProfiles.Count == 0 ? CompatibilityProblem.InactiveVpn
             : !Regex.IsMatch(Router.Firmware, @"^[0-9]+\.[0-9]+\.[0-9]+$") ? CompatibilityProblem.UnreadableFirmware
             : CompatibilityCatalog.Classify(Router.Rtp2Hash) is Compatibility.Unknown or Compatibility.KnownIncompatible
                 ? CompatibilityProblem.UnknownFiles
@@ -166,7 +169,7 @@ public sealed class WizardViewModel : Observable, IDisposable
             : CompatibilityProblem.None;
         RefreshPresentation();
     }
-    private int profileCount;
+    private int profileCount, locationProfileCount;
     public async Task ConnectAsync(string password)
     {
         await RunAsync(async ct =>
@@ -187,7 +190,16 @@ public sealed class WizardViewModel : Observable, IDisposable
                     var profiles = await attempt.ProfilesAsync(ct);
                     ct.ThrowIfCancellationRequested();
                     profileCount = profiles.Count;
-                    foreach (var profile in profiles.Where(p => DistinctPlaces(p) >= 2)) EligibleProfiles.Add(profile);
+                    foreach (var profile in profiles.Where(p => DistinctPlaces(p) >= 2))
+                    {
+                        locationProfileCount++;
+                        try
+                        {
+                            await attempt.VerifyActiveProfileAsync(profile, ct);
+                            EligibleProfiles.Add(profile);
+                        }
+                        catch (SafeFailure) { } // Only verified tunnels are selectable.
+                    }
                     SelectedProfile = EligibleProfiles.FirstOrDefault();
                 }
                 Router = identity;
@@ -214,6 +226,7 @@ public sealed class WizardViewModel : Observable, IDisposable
         GuardEntries.Clear();
         RebootStartText = ""; RebootEndText = "";
         profileCount = 0;
+        locationProfileCount = 0;
         problem = CompatibilityProblem.None;
         AcceptUnsupportedFirmware = false;
         SetConnection(false);

@@ -17,6 +17,7 @@ public interface IRouterSession : IDisposable
     bool IsDemo { get; }
     Task<RouterIdentity> ConnectAsync(string address, string password, CancellationToken ct);
     Task<IReadOnlyList<VpnProfile>> ProfilesAsync(CancellationToken ct);
+    Task VerifyActiveProfileAsync(VpnProfile profile, CancellationToken ct);
     Task<IReadOnlyList<LanClient>> ClientsAsync(CancellationToken ct);
     Task<InstallationPlan> PlanAsync(InstallerConfiguration configuration, CancellationToken ct);
     Task<InstallationResult> InstallAsync(InstallerConfiguration configuration, IProgress<string> progress, CancellationToken ct);
@@ -122,6 +123,13 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
     }
     public Task<IReadOnlyList<VpnProfile>> ProfilesAsync(CancellationToken ct)
     { RequireBrume(); return new VpnDiscovery(this).DiscoverAsync(ct); }
+    public async Task VerifyActiveProfileAsync(VpnProfile profile, CancellationToken ct)
+    {
+        RequireBrume();
+        var (_, peer) = await new RouterInspection(this, new KillSwitchVerifier()).VerifyPolicySlotsAsync(profile, ct);
+        if (!profile.Connections.Any(connection => connection.PeerId == peer))
+            throw new SafeFailure("The active VPN connection is not in the selected VPN tunnel.");
+    }
     public async Task<IReadOnlyList<LanClient>> ClientsAsync(CancellationToken ct)
     {
         RequireBrume();
