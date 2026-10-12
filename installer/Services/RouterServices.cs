@@ -17,6 +17,7 @@ public interface IRouterSession : IDisposable
     bool IsDemo { get; }
     Task<RouterIdentity> ConnectAsync(string address, string password, CancellationToken ct);
     Task<IReadOnlyList<VpnProfile>> ProfilesAsync(CancellationToken ct);
+    Task VerifyFirmwareFilesAsync(RouterIdentity identity, CancellationToken ct);
     Task VerifyActiveProfileAsync(VpnProfile profile, CancellationToken ct);
     Task<IReadOnlyList<LanClient>> ClientsAsync(CancellationToken ct);
     Task<InstallationPlan> PlanAsync(InstallerConfiguration configuration, CancellationToken ct);
@@ -123,6 +124,11 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
     }
     public Task<IReadOnlyList<VpnProfile>> ProfilesAsync(CancellationToken ct)
     { RequireBrume(); return new VpnDiscovery(this).DiscoverAsync(ct); }
+    public Task VerifyFirmwareFilesAsync(RouterIdentity routerIdentity, CancellationToken ct)
+    {
+        RequireBrume();
+        return RouterPrerequisites.VerifyFirmwareFilesAsync(this, routerIdentity, ct);
+    }
     public async Task VerifyActiveProfileAsync(VpnProfile profile, CancellationToken ct)
     {
         RequireBrume();

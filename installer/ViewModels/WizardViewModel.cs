@@ -34,7 +34,7 @@ public sealed class WizardViewModel : Observable, IDisposable
     private VpnProfile? selectedProfile;
     private CompatibilityProblem problem;
     private IReadOnlyList<LanClient> knownClients = [];
-    private bool connected, everConnected, busy, acceptUnsupportedFirmware;
+    private bool connected, everConnected, busy, acceptUnsupportedFirmware, firmwareFilesKnown;
     private bool installed;
     private int page;
     private string status = "Ready", routerAddress = "192.168.8.1", rebootStartText = "", rebootEndText = "";
@@ -109,7 +109,7 @@ public sealed class WizardViewModel : Observable, IDisposable
         CompatibilityProblem.InactiveVpn => "No eligible VPN tunnel has a usable active WireGuard slot.",
         CompatibilityProblem.UnreadableFirmware => "The router's firmware version could not be verified.",
         CompatibilityProblem.WrongFirmware => "This firmware version has not been verified.",
-        CompatibilityProblem.UnknownFiles => "The router's GL.iNet VPN system files don't match a supported layout.",
+        CompatibilityProblem.UnknownFiles => "The router's GL.iNet VPN system files could not be verified as supported.",
         _ => "Compatible"
     };
     public string CompatibilityDescription => problem switch
@@ -120,7 +120,7 @@ public sealed class WizardViewModel : Observable, IDisposable
         CompatibilityProblem.InactiveVpn => "Activate an eligible VPN tunnel in the VPN Dashboard. If it is already active, check that its WireGuard slots are not used by another VPN policy, then reconnect here.",
         CompatibilityProblem.UnreadableFirmware => "Check the router's firmware information in its Admin Panel, then reconnect. Installation cannot continue without a readable version.",
         CompatibilityProblem.WrongFirmware => $"Detected firmware: {Router?.Firmware ?? "Unknown"}. You can try continuing, but Hotswapper will still reject any unrecognized system-file contents before patching.",
-        CompatibilityProblem.UnknownFiles => "The firmware files must match a known stock or previously patched layout. The version override cannot bypass these checks.",
+        CompatibilityProblem.UnknownFiles => "One or more required firmware files could not be verified against a known stock or previously patched layout. The version override cannot bypass these checks.",
         _ => ""
     };
     public bool AcceptUnsupportedFirmware
@@ -163,7 +163,7 @@ public sealed class WizardViewModel : Observable, IDisposable
             : locationProfileCount == 0 ? CompatibilityProblem.InsufficientLocations
             : EligibleProfiles.Count == 0 ? CompatibilityProblem.InactiveVpn
             : !Regex.IsMatch(Router.Firmware, @"^[0-9]+\.[0-9]+\.[0-9]+$") ? CompatibilityProblem.UnreadableFirmware
-            : CompatibilityCatalog.Classify(Router.Rtp2Hash) is Compatibility.Unknown or Compatibility.KnownIncompatible
+            : !firmwareFilesKnown || CompatibilityCatalog.Classify(Router.Rtp2Hash) is Compatibility.Unknown or Compatibility.KnownIncompatible
                 ? CompatibilityProblem.UnknownFiles
             : !CompatibilityCatalog.TestedFirmware.Contains(Router.Firmware) ? CompatibilityProblem.WrongFirmware
             : CompatibilityProblem.None;
@@ -187,6 +187,12 @@ public sealed class WizardViewModel : Observable, IDisposable
                 ct.ThrowIfCancellationRequested();
                 if (identity.IsBrume)
                 {
+                    try
+                    {
+                        await attempt.VerifyFirmwareFilesAsync(identity, ct);
+                        firmwareFilesKnown = true;
+                    }
+                    catch (SafeFailure) { } // Keep the connection open so the compatibility screen can explain the block.
                     var profiles = await attempt.ProfilesAsync(ct);
                     ct.ThrowIfCancellationRequested();
                     profileCount = profiles.Count;
@@ -227,6 +233,7 @@ public sealed class WizardViewModel : Observable, IDisposable
         RebootStartText = ""; RebootEndText = "";
         profileCount = 0;
         locationProfileCount = 0;
+        firmwareFilesKnown = false;
         problem = CompatibilityProblem.None;
         AcceptUnsupportedFirmware = false;
         SetConnection(false);

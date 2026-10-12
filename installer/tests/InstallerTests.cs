@@ -7,12 +7,20 @@ namespace BrumeHotswapper.Tests;
 public class InstallerTests
 {
     private sealed class DiscoverySession(RouterIdentity identity, IReadOnlyList<VpnProfile> profiles, bool failDiscovery = false,
-        IReadOnlySet<string>? activePolicies = null) : IRouterSession
+        IReadOnlySet<string>? activePolicies = null, bool filesKnown = true) : IRouterSession
     {
         public bool IsDemo => true;
+        public int FirmwareFileChecks { get; private set; }
         public Task<RouterIdentity> ConnectAsync(string address, string password, CancellationToken ct) => Task.FromResult(identity);
         public Task<IReadOnlyList<VpnProfile>> ProfilesAsync(CancellationToken ct) => failDiscovery
             ? throw new SafeFailure("VPN discovery failed.") : Task.FromResult(profiles);
+        public Task VerifyFirmwareFilesAsync(RouterIdentity routerIdentity, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            FirmwareFileChecks++;
+            if (!filesKnown) throw new SafeFailure("Unsupported GL coordination target.");
+            return Task.CompletedTask;
+        }
         public Task VerifyActiveProfileAsync(VpnProfile profile, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
@@ -169,6 +177,29 @@ public class InstallerTests
         Assert.False(unreadable.ShowPrimary);
     }
 
+    [Theory][InlineData("4.9.0")][InlineData("4.10.0")]
+    public async Task UnknownSecondaryFirmwareFileBlocksBeforeTierConfiguration(string version)
+    {
+        var profile = Profile("Croatia,Zagreb", "Austria,Vienna");
+        var session = new DiscoverySession(Brume with { Firmware = version }, [profile], filesKnown: false);
+        using var vm = new WizardViewModel((_,_) => true, true, () => session);
+        await Next(vm); await vm.ConnectAsync("");
+        Assert.Equal(1, session.FirmwareFileChecks);
+        Assert.Equal(2, vm.Page);
+        Assert.Contains("could not be verified", vm.CompatibilityHeadline);
+        Assert.False(vm.ShowFirmwareOverride);
+        Assert.False(vm.ShowPrimary);
+    }
+
+    [Fact] public async Task FirmwareFilesAreCheckedAtConnectionEvenWithoutVpnProfiles()
+    {
+        var session = new DiscoverySession(Brume, []);
+        using var vm = new WizardViewModel((_,_) => true, true, () => session);
+        await Next(vm); await vm.ConnectAsync("");
+        Assert.Equal(1, session.FirmwareFileChecks);
+        Assert.Equal(2, vm.Page);
+    }
+
     [Fact] public async Task TierTwoIsRequiredBeforeRecovery()
     {
         using var vm = new WizardViewModel((_,_) => true, demoMode: true);
@@ -236,6 +267,19 @@ public class InstallerTests
             identity with { Firmware = "Unknown" }, true, CancellationToken.None));
         router.FirmwareHashes[FirmwareTargets.All.First(t => t.Id != "rtp").Path] = "unknown";
         await Assert.ThrowsAsync<SafeFailure>(() => RouterPrerequisites.VerifyFirmwareAsync(router, identity, true, CancellationToken.None));
+        await Assert.ThrowsAsync<SafeFailure>(() => RouterPrerequisites.VerifyFirmwareFilesAsync(router, Brume, CancellationToken.None));
+    }
+
+    [Fact] public async Task EarlyFirmwareCheckCoversEveryRequiredHash()
+    {
+        await RouterPrerequisites.VerifyFirmwareFilesAsync(new RouterFixture(), Brume with { Firmware = "4.10.0" }, CancellationToken.None);
+        foreach (var target in FirmwareTargets.All)
+        {
+            var router = new RouterFixture();
+            if (target.Id == "rtp") router.FirmwareHash = "unknown";
+            else router.FirmwareHashes[target.Path] = "unknown";
+            await Assert.ThrowsAsync<SafeFailure>(() => RouterPrerequisites.VerifyFirmwareFilesAsync(router, Brume, CancellationToken.None));
+        }
     }
 
     [Fact] public void NormalStartupDoesNotSelectDemo()

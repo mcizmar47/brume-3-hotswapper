@@ -13,6 +13,13 @@ public sealed class DemoRouterSession : IRouterSession
             for (int i = 0; i < count; i++) peers.Add(new((id++).ToString(), $"Demo connection {id}", location));
         return Task.FromResult<IReadOnlyList<VpnProfile>>([new("42", "7", peers)]);
     }
+    public Task VerifyFirmwareFilesAsync(RouterIdentity identity, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (CompatibilityCatalog.Classify(identity.Rtp2Hash) is Compatibility.Unknown or Compatibility.KnownIncompatible)
+            throw new SafeFailure("The demo firmware is not supported.");
+        return Task.CompletedTask;
+    }
     public Task VerifyActiveProfileAsync(VpnProfile profile, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();

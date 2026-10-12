@@ -22,6 +22,13 @@ public static class RouterPrerequisites
             throw new SafeFailure("The router firmware version could not be verified.");
         if (!CompatibilityCatalog.TestedFirmware.Contains(identity.Firmware) && !allowUnsupportedFirmware)
             throw new SafeFailure("Unsupported router firmware version.");
+        await VerifyFirmwareFilesAsync(router, identity, ct);
+        await router.ExecuteAsync("busybox --list | grep -Fxq flock", ct);
+        await router.ExecuteAsync("command -v iptables-restore >/dev/null && command -v lua >/dev/null", ct);
+    }
+    public static async Task VerifyFirmwareFilesAsync(IRouterTransport router,RouterIdentity identity,CancellationToken ct)
+    {
+        if (!identity.IsBrume) throw new SafeFailure("Unsupported router identity.");
         var hash=(await router.ExecuteAsync("sha256sum /usr/bin/rtp2.sh | awk '{print $1}'",ct)).Trim();
         if (hash != identity.Rtp2Hash || CompatibilityCatalog.Classify(hash) is Compatibility.Unknown or Compatibility.KnownIncompatible)
             throw new SafeFailure("Firmware changed or its compatibility is not established.");
@@ -30,7 +37,5 @@ public static class RouterPrerequisites
             var actual = (await router.ExecuteAsync($"sha256sum {target.Path} | awk '{{print $1}}'", ct)).Trim();
             if (!target.Supports(actual)) throw new SafeFailure("Unsupported GL coordination target: " + target.Path);
         }
-        await router.ExecuteAsync("busybox --list | grep -Fxq flock", ct);
-        await router.ExecuteAsync("command -v iptables-restore >/dev/null && command -v lua >/dev/null", ct);
     }
 }
