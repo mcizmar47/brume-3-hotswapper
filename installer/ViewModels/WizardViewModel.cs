@@ -1,4 +1,7 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Net;
+using System.Text.RegularExpressions;
 using System.Windows.Input;
 using BrumeHotswapper.Installer.Core;
 using BrumeHotswapper.Installer.Services;
@@ -12,170 +15,358 @@ public sealed class RelayCommand(Action execute, Func<bool>? can = null) : IComm
     public void Execute(object? parameter) => execute();
     public void Refresh() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 }
+
+public sealed class GuardIpEntry : Observable
+{
+    private string address = "";
+    public string Address { get => address; set => Set(ref address, value); }
+}
+
 public sealed class WizardViewModel : Observable, IDisposable
 {
-    private readonly Func<string, string, bool> trust;
+    private enum CompatibilityProblem { None, WrongDevice, MissingVpn, InsufficientLocations, UnreadableFirmware, WrongFirmware, UnknownFiles }
+    private static readonly string[] PageTitles = ["Prerequisites", "Connect", "Compatibility", "Configure Tiers", "Tier 1 Recovery", "Installation"];
+    private readonly Func<IRouterSession> createSession;
+    private readonly DiagnosticLog log = new();
     private IRouterSession? session;
     private CancellationTokenSource? operation;
-    private readonly DiagnosticLog log = new();
-    private int page;
-    private bool busy, demo, acknowledged, notifications, maintenance;
-    private string status = "Ready", manualAddress = "", review = "", ntfyUrl = "";
     private RouterIdentity? router;
     private VpnProfile? selectedProfile;
+    private CompatibilityProblem problem;
+    private IReadOnlyList<LanClient> knownClients = [];
+    private bool connected, everConnected, busy, acceptUnsupportedFirmware;
     private bool installed;
-    private InstallationPlan? plan;
-    public static readonly string[] PageTitles = ["Welcome", "Find your Brume", "Verify device", "Compatibility", "Discover VPNs", "Arrange failover", "Notifications", "Maintenance", "Review", "Installation", "Validation", "Complete"];
-    public WizardViewModel(Func<string, string, bool> trust)
+    private int page;
+    private string status = "Ready", routerAddress = "192.168.8.1", rebootStartText = "", rebootEndText = "";
+    private string installationHeadline = "Installing…";
+    private readonly bool demo;
+
+    public WizardViewModel(Func<string, string, bool> trust, bool demoMode = false, Func<IRouterSession>? sessionFactory = null)
     {
-        this.trust = trust;
-        NextCommand = new(() => _ = RunAsync(NextAsync), CanNext);
-        BackCommand = new(() => { Page--; }, () => !Busy && Page > 0 && Page < 9);
-        CancelCommand = new(() => operation?.Cancel(), () => Busy);
-        TestNotificationCommand = new(() => _ = RunAsync(async ct => { await NtfyService.TestAsync(NtfyUrl, Demo, ct); Status = Demo ? "DEMO · notification simulated" : "Test delivered from this PC. Router delivery still needs validation."; }), () => !Busy && Notifications);
-        Demo = Environment.GetCommandLineArgs().Contains("--demo");
+        demo = demoMode || Environment.GetCommandLineArgs().Contains("--demo");
+        createSession = sessionFactory ?? (() => demo ? new DemoRouterSession() : new SshRouterSession(trust));
+        BackCommand = new(Back, () => !Busy && Page is > 0 and < 5);
+        PrimaryCommand = new(() => _ = RunAsync(NextAsync), CanContinue);
+        DisconnectCommand = new(Disconnect, () => !Busy && Page == 1 && Connected);
+        AddGuardCommand = new(AddGuard, () => !Busy && Page == 4);
     }
-    public RelayCommand NextCommand { get; }
+
     public RelayCommand BackCommand { get; }
-    public RelayCommand CancelCommand { get; }
-    public RelayCommand TestNotificationCommand { get; }
-    public int Page { get => page; private set { Set(ref page, value); Changed(nameof(Title)); Changed(nameof(StepLabel)); Changed(nameof(NextLabel)); Refresh(); } }
+    public RelayCommand PrimaryCommand { get; }
+    public RelayCommand DisconnectCommand { get; }
+    public RelayCommand AddGuardCommand { get; }
+    public string ModeLabel => demo ? "DEMO — no router changes" : "";
+    public string SupportedVersions => string.Join(", ", CompatibilityCatalog.TestedFirmware.OrderBy(x => x));
+    public int Page { get => page; private set { if (Set(ref page, value)) RefreshPresentation(); } }
     public string Title => PageTitles[Page];
-    public string StepLabel => $"STEP {Page + 1} OF {PageTitles.Length}";
-    public string NextLabel => Page == 8 ? (Demo ? "Simulate install" : "Install") : Page == 10 ? "Finish" : "Next →";
-    public bool Busy { get => busy; private set { Set(ref busy, value); Changed(nameof(Idle)); Refresh(); } }
+    public string StepLabel => Page == 2 ? "CONNECTION CHECK" : Page == 5 ? "INSTALLATION" : $"SETUP · {Page switch { 0 => 1, 1 => 2, 3 => 3, 4 => 4, _ => 1 }} OF 4";
+    public string PrimaryLabel => Page switch { 4 => "Install", 2 => "Continue", _ => "Continue" };
+    public bool Busy { get => busy; private set { if (Set(ref busy, value)) { Changed(nameof(Idle)); RefreshPresentation(); } } }
     public bool Idle => !Busy;
-    public bool Demo { get => demo; set { if (Set(ref demo, value)) { session?.Dispose(); session = null; ResetConnection(); Changed(nameof(ModeLabel)); } } }
-    public string ModeLabel => Demo ? "DEMO · no network or router changes" : "";
-    public bool Acknowledged { get => acknowledged; set { Set(ref acknowledged, value); Refresh(); } }
-    public bool Notifications { get => notifications; set { Set(ref notifications, value); Refresh(); } }
-    private int rebootWindowStart = ConfigTemplates.MaintenanceHours.Start, rebootWindowEnd = ConfigTemplates.MaintenanceHours.End;
-    public string[] Hours { get; } = Enumerable.Range(0, 24).Select(h => $"{h:00}:00").ToArray();
-    public int RebootWindowStart { get => rebootWindowStart; set => Set(ref rebootWindowStart, value); }
-    public int RebootWindowEnd { get => rebootWindowEnd; set => Set(ref rebootWindowEnd, value); }
-    public bool Maintenance { get => maintenance; set => Set(ref maintenance, value); }
-    public string NtfyUrl { get => ntfyUrl; set => Set(ref ntfyUrl, value); }
-    public string ManualAddress { get => manualAddress; set => Set(ref manualAddress, value); }
+    public bool ShowBack => Page is > 0 and < 5;
+    public bool ShowCancel => Page < 5;
+    public bool ShowPrimary => Page is 0 or 3 or 4 || Page == 1 && Connected || Page == 2 && problem == CompatibilityProblem.WrongFirmware;
+    public bool ShowSaveLog => Page == 5;
+    public bool ShowConnect => Page == 1;
+    public bool ShowConnectionStatus => Page == 1 && EverConnected;
+    public bool Connected => connected;
+    public bool EverConnected => everConnected;
+    public bool IsDisconnected => !Connected;
+    public bool CanConnect => Page == 1 && !Busy && !Connected;
+    public string ConnectionButtonLabel => Connected ? "Connected" : "Connect";
+    public string DisconnectLabel => Connected ? "Disconnect" : "Disconnected";
+    public string RouterAddress { get => routerAddress; set => Set(ref routerAddress, value); }
+    public string ConnectionSummary => !Connected ? "Not connected." : $"Connected to {Router?.Model} at {Router?.Address} (firmware {Router?.Firmware}).";
     public string Status { get => status; private set => Set(ref status, value); }
-    public string Review { get => review; private set => Set(ref review, value); }
-    public RouterIdentity? Router { get => router; private set { Set(ref router, value); Changed(nameof(DeviceSummary)); Changed(nameof(CompatibilitySummary)); Changed(nameof(CompatibilityDetails)); Refresh(); } }
-    public string DeviceSummary => Router is null ? "No router connected." : $"{Router.Model}\nAddress: {Router.Address}\n\n" + (Router.IsBrume ? "GL-MT5000 verified. You may continue." : "Unsupported device. Installation is blocked; connect to a Brume 3 / GL-MT5000.");
-    public string CompatibilityDetails => Router == null ? "" : $"Board: {Router.Board}\nAddress: {Router.Address}\nrtp2 SHA-256: {Router.Rtp2Hash}";
-    public string CompatibilitySummary => Router is null ? "" : $"Firmware: {Router.Firmware}\n"
-        + (CompatibilityCatalog.TestedFirmware.Contains(Router.Firmware) ? "Tested firmware version." : "This firmware version has not been tested. Installation is blocked.")
-        + "\n\n" + (CompatibilityCatalog.Classify(Router.Rtp2Hash) switch
-        {
-            Compatibility.StockKnownCompatible => "Known compatible GL VPN implementation.",
-            Compatibility.AlreadyPatchedKnownCompatible => "Existing GL reconciliation guard detected.",
-            Compatibility.KnownIncompatible => "This GL VPN implementation is known to be incompatible. Installation cannot continue.",
-            _ => "The GL VPN reconciliation implementation is unknown. Installation is blocked until its compatibility is established."
-        });
-    public VpnProfile? SelectedProfile { get => selectedProfile; set { if (Set(ref selectedProfile, value)) { foreach (var t in Tiers) t.Locations.Clear(); if (value != null) foreach (var g in new ExactLocationResolver().Group(value.Connections)) Tiers[0].Locations.Add(g); Refresh(); } } }
-    public ObservableCollection<VpnProfile> Profiles { get; } = [];
-    public ObservableCollection<TierColumn> Tiers { get; } = [new("Unassigned", 0), new("Tier 1 · preferred", 1), new("Tier 2 · fallback", 2), new("Tier 3 · last resort", 3)];
-    public ObservableCollection<LanClient> Clients { get; } = [];
+    public string InstallationHeadline { get => installationHeadline; private set => Set(ref installationHeadline, value); }
     public ObservableCollection<string> Progress { get; } = [];
-    public ObservableCollection<string> Validation { get; } = [];
-    public string Report => log.Report(Demo);
-    public async Task ConnectAsync(string password, bool manual)
+    public string InstallationLog => log.Report(demo);
+
+    public ObservableCollection<VpnProfile> EligibleProfiles { get; } = [];
+    public ObservableCollection<TierColumn> Tiers { get; } =
+        [new("Unassigned", 0), new("Tier 1 · Preferred", 1), new("Tier 2 · Secondary", 2), new("Tier 3 · Backup", 3)];
+    public VpnProfile? SelectedProfile
+    {
+        get => selectedProfile;
+        set
+        {
+            if (!Set(ref selectedProfile, value)) return;
+            foreach (var t in Tiers) t.Locations.Clear();
+            if (value != null)
+                foreach (var group in new ExactLocationResolver().Group(value.Connections)) Tiers[0].Locations.Add(group);
+            RefreshPresentation();
+        }
+    }
+
+    public bool ShowVpnHelp => Page == 2 && (problem is CompatibilityProblem.MissingVpn or CompatibilityProblem.InsufficientLocations);
+    public bool ShowFirmwareHelp => Page == 2 && (problem is CompatibilityProblem.UnreadableFirmware or CompatibilityProblem.WrongFirmware or CompatibilityProblem.UnknownFiles);
+    public bool ShowFirmwareOverride => Page == 2 && problem == CompatibilityProblem.WrongFirmware;
+    public string CompatibilityHeadline => problem switch
+    {
+        CompatibilityProblem.WrongDevice => "Cannot verify that this device is a GL.iNet Brume 3 (GL-MT5000).",
+        CompatibilityProblem.MissingVpn => "No VPN tunnel profile is set up. Cannot continue.",
+        CompatibilityProblem.InsufficientLocations => "None of the VPN tunnels contain two distinct geographic locations.",
+        CompatibilityProblem.UnreadableFirmware => "The router's firmware version could not be verified.",
+        CompatibilityProblem.WrongFirmware => "This firmware version has not been verified.",
+        CompatibilityProblem.UnknownFiles => "The router's GL.iNet VPN system files don't match a supported layout.",
+        _ => "Compatible"
+    };
+    public string CompatibilityDescription => problem switch
+    {
+        CompatibilityProblem.WrongDevice => $"Detected: {Router?.Model ?? "Unknown device"}. Installation supports GL-MT5000 only.",
+        CompatibilityProblem.MissingVpn => "Create a VPN tunnel and add VPN connections to it, then disconnect and reconnect here.",
+        CompatibilityProblem.InsufficientLocations => "Add connections to at least two different country/city locations within one VPN tunnel, then reconnect here.",
+        CompatibilityProblem.UnreadableFirmware => "Check the router's firmware information in its Admin Panel, then reconnect. Installation cannot continue without a readable version.",
+        CompatibilityProblem.WrongFirmware => $"Detected firmware: {Router?.Firmware ?? "Unknown"}. You can try continuing, but Hotswapper will still reject any unrecognized system-file contents before patching.",
+        CompatibilityProblem.UnknownFiles => "The firmware files must match a known stock or previously patched layout. The version override cannot bypass these checks.",
+        _ => ""
+    };
+    public bool AcceptUnsupportedFirmware
+    {
+        get => acceptUnsupportedFirmware;
+        set { if (Set(ref acceptUnsupportedFirmware, value)) RefreshPresentation(); }
+    }
+
+    public ObservableCollection<GuardIpEntry> GuardEntries { get; } = [];
+    public bool HasGuards => GuardEntries.Count > 0;
+    public string GuardHint => !HasGuards
+        ? "No protected devices. Only the first reboot hour is needed."
+        : "Only IP addresses with an existing DHCP reservation on this router can be used.";
+    public string RebootStartText { get => rebootStartText; set { if (Set(ref rebootStartText, value)) RefreshPresentation(); } }
+    public string RebootEndText { get => rebootEndText; set { if (Set(ref rebootEndText, value)) RefreshPresentation(); } }
+
+    private void RefreshPresentation()
+    {
+        foreach (var p in new[] { nameof(Title), nameof(StepLabel), nameof(PrimaryLabel), nameof(ShowBack),
+            nameof(ShowCancel), nameof(ShowPrimary), nameof(ShowConnect), nameof(ShowConnectionStatus),
+            nameof(ShowSaveLog), nameof(ConnectionButtonLabel), nameof(DisconnectLabel), nameof(ConnectionSummary),
+            nameof(Connected), nameof(IsDisconnected), nameof(CanConnect), nameof(EverConnected),
+            nameof(ShowVpnHelp), nameof(ShowFirmwareHelp), nameof(ShowFirmwareOverride), nameof(CompatibilityHeadline),
+            nameof(CompatibilityDescription), nameof(HasGuards), nameof(GuardHint) }) Changed(p);
+        BackCommand.Refresh(); PrimaryCommand.Refresh(); DisconnectCommand.Refresh(); AddGuardCommand.Refresh();
+    }
+    private void SetConnection(bool value)
+    {
+        connected = value;
+        if (value) everConnected = true;
+        RefreshPresentation();
+    }
+    private static int DistinctPlaces(VpnProfile p) => new ExactLocationResolver().Group(p.Connections)
+        .Count(g => !g.Label.StartsWith("Unresolved peer ", StringComparison.Ordinal));
+    private void EvaluateCompatibility()
+    {
+        // Order is intentional. Never replace a wrong-device error with a firmware error.
+        problem = Router?.IsBrume != true ? CompatibilityProblem.WrongDevice
+            : EligibleProfiles.Count == 0 && selectedProfile == null && profileCount == 0 ? CompatibilityProblem.MissingVpn
+            : EligibleProfiles.Count == 0 ? CompatibilityProblem.InsufficientLocations
+            : !Regex.IsMatch(Router.Firmware, @"^[0-9]+\.[0-9]+\.[0-9]+$") ? CompatibilityProblem.UnreadableFirmware
+            : CompatibilityCatalog.Classify(Router.Rtp2Hash) is Compatibility.Unknown or Compatibility.KnownIncompatible
+                ? CompatibilityProblem.UnknownFiles
+            : !CompatibilityCatalog.TestedFirmware.Contains(Router.Firmware) ? CompatibilityProblem.WrongFirmware
+            : CompatibilityProblem.None;
+        RefreshPresentation();
+    }
+    private int profileCount;
+    public async Task ConnectAsync(string password)
     {
         await RunAsync(async ct =>
         {
-            ResetConnection();
-            session ??= Demo ? new DemoRouterSession() : new SshRouterSession(trust);
-            if (!Demo && string.IsNullOrEmpty(password)) throw new SafeFailure("Enter the router administrator password.");
-            var candidates = Demo ? new[] { "192.0.2.1" } : manual ? new[] { ManualAddress.Trim() } : RouterDiscovery.Candidates();
-            int authenticationAttempts = 0;
-            foreach (var address in candidates)
+            if (string.IsNullOrWhiteSpace(password) && !demo) throw new SafeFailure("Enter the router administrator password.");
+            session?.Dispose();
+            session = null;
+            ClearConnectionData();
+            IRouterSession attempt = createSession();
+            session = attempt;
+            Status = "Connecting…";
+            try
             {
-                ct.ThrowIfCancellationRequested(); Status = $"Checking {address}…";
-                if (!Demo && !await RouterDiscovery.HasSshAsync(address, ct)) continue;
-                if (++authenticationAttempts > 4) break;
-                try
+                var identity = await attempt.ConnectAsync(demo ? "192.0.2.1" : RouterAddress.Trim(), password, ct);
+                ct.ThrowIfCancellationRequested();
+                if (identity.IsBrume)
                 {
-                    Router = await session.ConnectAsync(address, password, ct);
-                    if (Router.IsBrume || manual || Demo) { Page = 2; Status = Router.IsBrume ? "Router identity verified." : "Unsupported device — installation blocked."; return; }
+                    var profiles = await attempt.ProfilesAsync(ct);
+                    ct.ThrowIfCancellationRequested();
+                    profileCount = profiles.Count;
+                    foreach (var profile in profiles.Where(p => DistinctPlaces(p) >= 2)) EligibleProfiles.Add(profile);
+                    SelectedProfile = EligibleProfiles.FirstOrDefault();
                 }
-                catch (SafeFailure) { if (manual) throw; }
+                Router = identity;
+                session = attempt;
+                SetConnection(true);
+                EvaluateCompatibility();
+                Status = problem == CompatibilityProblem.None ? "Connected. Ready to configure tiers." : "Connected. Check the compatibility notice.";
+                Page = problem == CompatibilityProblem.None ? 3 : 2;
             }
-            if (Router != null) { Page = 2; Status = "No supported Brume found."; }
-            else throw new SafeFailure("No Brume found among local gateways and subnet edge addresses. Use the manual IPv4 address fallback; check SSH access and password.");
+            catch
+            {
+                attempt.Dispose();
+                session = null;
+                ClearConnectionData();
+                throw;
+            }
         });
     }
-    private void ResetConnection()
-    { Router = null; Profiles.Clear(); SelectedProfile = null; Clients.Clear(); installed = false; }
-    private bool CanNext() => !Busy && Page switch
+    private RouterIdentity? Router { get => router; set { router = value; RefreshPresentation(); } }
+    private void ClearConnectionData()
     {
-        0 => Acknowledged, 1 => false, 2 => Router?.IsBrume == true,
-        3 => Router != null && CompatibilityCatalog.Classify(Router.Rtp2Hash) != Compatibility.KnownIncompatible
-            && CompatibilityCatalog.Classify(Router.Rtp2Hash) != Compatibility.Unknown && CompatibilityCatalog.TestedFirmware.Contains(Router.Firmware),
-        4 => SelectedProfile != null,
-        9 => false, 10 => installed, 11 => false, _ => true
-    };
-    private InstallerConfiguration Configuration() => new(Router ?? throw new SafeFailure("Connect to a router first."),
-        SelectedProfile ?? throw new SafeFailure("Select a discovered VPN profile."), Tiers.ToArray(), Notifications, NtfyUrl, Maintenance,
-        Maintenance ? Clients.Where(c => c.Selected).ToArray() : [])
-        { RebootWindowStart = RebootWindowStart, RebootWindowEnd = RebootWindowEnd };
+        Router = null; EligibleProfiles.Clear(); SelectedProfile = null; knownClients = [];
+        foreach (var entry in GuardEntries) entry.PropertyChanged -= GuardChanged;
+        GuardEntries.Clear();
+        RebootStartText = ""; RebootEndText = "";
+        profileCount = 0;
+        problem = CompatibilityProblem.None;
+        AcceptUnsupportedFirmware = false;
+        SetConnection(false);
+    }
+    private void Disconnect()
+    {
+        session?.Dispose(); session = null;
+        ClearConnectionData();
+        Status = "Disconnected.";
+    }
+    private void Back()
+    {
+        if (Busy) return;
+        Page = Page switch { 4 => 3, 3 => 1, 2 => 1, 1 => 0, _ => 0 };
+    }
+    private bool CanContinue()
+    {
+        if (Busy) return false;
+        return Page switch
+        {
+            0 => true,
+            1 => Connected,
+            2 => Connected && problem == CompatibilityProblem.WrongFirmware && AcceptUnsupportedFirmware,
+            3 => Connected && SelectedProfile != null && Tiers[1].Locations.Count > 0 && Tiers[2].Locations.Count > 0,
+            4 => Connected && ValidHours() && ValidGuards(),
+            _ => false
+        };
+    }
+    private static bool Hour(string text, out int hour)
+    {
+        hour = 0;
+        return text.Length == 2 && text.All(c => c is >= '0' and <= '9') &&
+            int.TryParse(text, out hour) && hour is >= 0 and <= 23;
+    }
+    private bool ValidHours()
+    {
+        if (!Hour(RebootStartText, out var start)) return false;
+        return !HasGuards || Hour(RebootEndText, out var end) && start <= end;
+    }
+    private bool ValidGuards()
+    {
+        if (GuardEntries.Count == 0) return true;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in GuardEntries)
+        {
+            if (!IPAddress.TryParse(entry.Address.Trim(), out var parsed) ||
+                parsed.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork ||
+                !seen.Add(entry.Address.Trim()) ||
+                !knownClients.Any(d => d.Reserved && d.Ip == entry.Address.Trim())) return false;
+        }
+        return true;
+    }
+    private void AddGuard()
+    {
+        var entry = new GuardIpEntry();
+        entry.PropertyChanged += GuardChanged;
+        GuardEntries.Add(entry);
+        RefreshPresentation();
+    }
+    private void GuardChanged(object? sender, PropertyChangedEventArgs e) => RefreshPresentation();
+    public void RemoveGuard(GuardIpEntry entry)
+    {
+        entry.PropertyChanged -= GuardChanged;
+        GuardEntries.Remove(entry);
+        if (!HasGuards) RebootEndText = "";
+        RefreshPresentation();
+    }
+    private InstallerConfiguration Configuration()
+    {
+        var selected = SelectedProfile ?? throw new SafeFailure("Select an existing VPN tunnel.");
+        if (!ValidHours()) throw new SafeFailure("Enter a valid reboot hour (00–23). With protected devices, enter both hours in ascending order.");
+        if (!ValidGuards()) throw new SafeFailure("A reboot-blocking IP is invalid, duplicated or does not have an existing DHCP reservation on this router.");
+        var guards = GuardEntries.Select(g => knownClients.First(c => c.Reserved && c.Ip == g.Address.Trim())).ToArray();
+        var start = int.Parse(RebootStartText);
+        var end = HasGuards ? int.Parse(RebootEndText) : start;
+        return new InstallerConfiguration(Router ?? throw new SafeFailure("Connect to a Brume 3 first."), selected,
+            Tiers.ToArray(), false, "", true, guards)
+        {
+            RebootWindowStart = start,
+            RebootWindowEnd = end,
+            AllowUnsupportedFirmware = problem == CompatibilityProblem.WrongFirmware && AcceptUnsupportedFirmware
+        };
+    }
     private async Task NextAsync(CancellationToken ct)
     {
         switch (Page)
         {
+            case 0: Page = 1; Status = "Enter the router credentials."; return;
+            case 1:
+                EvaluateCompatibility(); Page = problem == CompatibilityProblem.None ? 3 : 2; return;
+            case 2: Page = 3; Status = "Configure failover locations."; return;
             case 3:
-                Profiles.Clear(); Status = "Reading existing VPN profile metadata…";
-                foreach (var p in await session!.ProfilesAsync(ct)) Profiles.Add(p);
-                SelectedProfile = VpnDiscovery.AutoSelect(Profiles.ToArray());
-                if (Profiles.Count == 0) Status = "No supported VPN lists found. Import VPN List connections and enable the selected VPN in the GL panel.";
-                else if (Profiles.Count > 1) Status = "Select the VPN list you want Hotswapper to manage.";
-                break;
-            case 5: ConfigurationGenerator.Validate(Configuration() with { Notifications = false }); break;
-            case 6:
-                ConfigurationGenerator.Validate(Configuration()); Clients.Clear(); Status = "Reading LAN clients…";
-                try { foreach (var client in await session!.ClientsAsync(ct)) Clients.Add(client); }
-                catch (SafeFailure) { Status = "LAN clients could not be read. Maintenance may remain disabled; check the LAN IPv4/DHCP configuration before selecting protected devices."; }
-                break;
-            case 7:
-                var c = Configuration(); ConfigurationGenerator.Validate(c);
-                plan = await session!.PlanAsync(c, ct);
-                Review = BuildReview(c) + $"\n\nGL.iNet kill switch: {(plan.Snapshot.KillSwitchEnabled ? "Enabled" : "Disabled — direct WAN fallback is permitted by the current GL.iNet VPN policy")} (preserved)" + "\n\nPLANNED CHANGES\n" + string.Join("\n", plan.Changes); break;
-            case 8:
-                var config = Configuration(); ConfigurationGenerator.Validate(config); Progress.Clear(); Page = 9;
+                Status = "Reading reserved LAN addresses…";
+                knownClients = await session!.ClientsAsync(ct);
+                Page = 4; Status = "Set the reboot schedule and optional protected devices.";
+                return;
+            case 4:
+                // PlanAsync still performs all real safety checks; no intermediate review screen.
+                var config = Configuration();
+                Page = 5; Progress.Clear(); InstallationHeadline = "Installing…"; Status = "Installation in progress.";
+                Progress.Add("Checking router state and preparing installation…");
+                log.Add("Checking router state and preparing installation…");
                 try
                 {
+                    _ = await session!.PlanAsync(config, ct);
                     var progress = new Progress<string>(s => { Progress.Add(s); Status = s; log.Add(s); });
-                    var result = await session!.InstallAsync(config, progress, ct);
-                    installed = result.Success; Validation.Clear(); foreach (var check in result.Checks) { Validation.Add(check); log.Add(check); }
-                    if (installed) { NtfyUrl = ""; plan = null; session?.Dispose(); session = null; }
-                    Page = 10; Status = Demo ? "Simulation complete. Review the simulated validation results." : "Validation finished.";
+                    var result = await session.InstallAsync(config, progress, ct);
+                    installed = result.Success;
+                    foreach (var line in result.Checks) { Progress.Add(line); log.Add(line); }
+                    InstallationHeadline = installed ? "Installation complete" : "Installation failed";
+                    Status = installed ? "Hotswapper is installed. No synthetic failover was performed." : "Installation failed.";
                 }
-                catch { Page = 8; throw; }
+                catch (OperationCanceledException) { InstallationHeadline = "Installation cancelled"; throw; }
+                catch (SafeFailure e) { InstallationHeadline = "Installation failed"; throw new SafeFailure(e.Message); }
+                catch { InstallationHeadline = "Installation failed"; throw; }
+                finally { session?.Dispose(); session = null; }
                 return;
-            case 10:
-                NtfyUrl = ""; session?.Dispose(); session = null;
-                Status = Demo ? "Demo complete. No real installation was performed." : "Installation complete.";
-                break;
         }
-        Page++;
-    }
-    private static string BuildReview(InstallerConfiguration c) => $"ROUTER\n{c.Router.Model} · {c.Router.Address}\nFirmware: {c.Router.Firmware} · {(CompatibilityCatalog.TestedFirmware.Contains(c.Router.Firmware) ? "tested" : "untested")}\nrtp2: {CompatibilityCatalog.Classify(c.Router.Rtp2Hash)}\nVPN list: {c.Profile.Display}\n\nVPN LOCATIONS\n"
-        + string.Join("\n\n", c.Tiers.Select(t => t.Title + "\n" + (t.Locations.Count == 0 ? "  None" : string.Join('\n', t.Locations.Select((g, i) => $"  {i + 1}. {g.Label} ({g.Connections.Count} connections)")))))
-        + $"\n\nNotifications: {(c.Notifications ? "Enabled (private URL hidden)" : "Disabled")}\nAutomatic maintenance: {(c.Maintenance ? $"Enabled · hourly from {c.RebootWindowStart:00}:00 to {c.RebootWindowEnd:00}:00 (router time)" : "Disabled")}\nReboot guards: {string.Join(", ", c.Guards.Select(g => g.Hostname))}\n\nCOMPONENTS\nHotswapper · supervisor · housekeeping · GL reconciliation guard\nPrivate configuration · location pools · supervisor cron every 5 minutes\n\nThe selected VPN connection will be checked again before applying these changes. No router reboot or synthetic failover will be performed.";
-    public void Move(VpnLocationGroup group, TierColumn target, int index)
-    {
-        if (Busy) return;
-        var source = Tiers.Single(t => t.Locations.Contains(group)); int old = source.Locations.IndexOf(group);
-        if (source == target && old < index) index--;
-        source.Locations.Remove(group); target.Locations.Insert(Math.Clamp(index, 0, target.Locations.Count), group); Refresh();
     }
     private async Task RunAsync(Func<CancellationToken, Task> action)
     {
         if (Busy) return;
         using var cts = new CancellationTokenSource(); operation = cts; Busy = true;
         try { await action(cts.Token); }
-        catch (OperationCanceledException) { Status = "Operation cancelled. No installation completed."; log.Add("Operation cancelled."); }
-        catch (SafeFailure e) { Status = e.Message; log.Add(e.Message); }
-        catch { Status = "The operation failed. Check connectivity and try again. Sensitive diagnostic details were withheld."; log.Add("Operation failed; raw exception withheld."); }
-        finally { Busy = false; operation = null; Changed(nameof(Report)); }
+        catch (OperationCanceledException)
+        {
+            Status = "Operation cancelled."; Progress.Add(Status); log.Add(Status);
+        }
+        catch (SafeFailure e)
+        {
+            Status = e.Message; if (Page == 5) Progress.Add("ERROR: " + e.Message); log.Add("ERROR: " + e.Message);
+        }
+        catch
+        {
+            Status = "Operation failed. See router state or try again. Sensitive details were withheld.";
+            if (Page == 5) Progress.Add("ERROR: " + Status);
+            log.Add("ERROR: " + Status);
+        }
+        finally { Busy = false; operation = null; RefreshPresentation(); }
     }
-    private void Refresh() { NextCommand?.Refresh(); BackCommand?.Refresh(); CancelCommand?.Refresh(); TestNotificationCommand?.Refresh(); }
-    public void Dispose() { operation?.Cancel(); session?.Dispose(); session = null; plan = null; NtfyUrl = ""; }
+    public void Move(VpnLocationGroup group, TierColumn target, int index)
+    {
+        if (Busy || Page != 3) return;
+        var source = Tiers.Single(t => t.Locations.Contains(group));
+        var old = source.Locations.IndexOf(group);
+        if (source == target && old < index) index--;
+        source.Locations.Remove(group);
+        target.Locations.Insert(Math.Clamp(index, 0, target.Locations.Count), group);
+        RefreshPresentation();
+    }
+    public void Dispose()
+    {
+        operation?.Cancel(); session?.Dispose(); session = null;
+        foreach (var entry in GuardEntries) entry.PropertyChanged -= GuardChanged;
+    }
 }

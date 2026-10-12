@@ -5,13 +5,14 @@ using BrumeHotswapper.Installer.ViewModels;
 namespace BrumeHotswapper.Tests;
 public class HousekeepingTests
 {
-    [Fact] public void MaintenanceUiOffersOnlyWholeHours()
+    [Fact] public void RecoveryUiStartsWithEmptyTwoDigitHours()
     {
         using var vm = new WizardViewModel((_,_)=>false);
-        Assert.Equal(3,vm.RebootWindowStart); Assert.Equal(14,vm.RebootWindowEnd);
-        Assert.Equal(Enumerable.Range(0,24).Select(h=>$"{h:00}:00"),vm.Hours);
-        vm.RebootWindowStart=8; vm.RebootWindowEnd=20;
-        Assert.Equal(8,vm.RebootWindowStart); Assert.Equal(20,vm.RebootWindowEnd);
+        Assert.Equal("", vm.RebootStartText);
+        Assert.Equal("", vm.RebootEndText);
+        vm.RebootStartText = "08"; vm.RebootEndText = "20";
+        Assert.Equal("08", vm.RebootStartText);
+        Assert.Equal("20", vm.RebootEndText);
     }
     [Fact] public void CanonicalDefaultsMatchGeneratedConfiguration()
     {

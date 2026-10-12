@@ -1,4 +1,5 @@
 using BrumeHotswapper.Installer.Core;
+using System.Text.RegularExpressions;
 namespace BrumeHotswapper.Installer.Services;
 public static class RouterPrerequisites
 {
@@ -12,9 +13,15 @@ public static class RouterPrerequisites
         try { await router.ExecuteAsync(DelayCommand, ct); }
         catch (RouterCommandFailure e) { throw new SafeFailure($"Router prerequisite check failed: sub-second delay behavior (BusyBox usleep, exit status {e.ExitStatus?.ToString() ?? "unknown"}); output withheld."); }
     }
-    public static async Task VerifyFirmwareAsync(IRouterTransport router,RouterIdentity identity,CancellationToken ct)
+    public static Task VerifyFirmwareAsync(IRouterTransport router,RouterIdentity identity,CancellationToken ct) =>
+        VerifyFirmwareAsync(router, identity, false, ct);
+    public static async Task VerifyFirmwareAsync(IRouterTransport router,RouterIdentity identity,bool allowUnsupportedFirmware,CancellationToken ct)
     {
-        if (!identity.IsBrume || !CompatibilityCatalog.TestedFirmware.Contains(identity.Firmware)) throw new SafeFailure("Unsupported router identity or firmware version.");
+        if (!identity.IsBrume) throw new SafeFailure("Unsupported router identity.");
+        if (!Regex.IsMatch(identity.Firmware, @"^[0-9]+\.[0-9]+\.[0-9]+$"))
+            throw new SafeFailure("The router firmware version could not be verified.");
+        if (!CompatibilityCatalog.TestedFirmware.Contains(identity.Firmware) && !allowUnsupportedFirmware)
+            throw new SafeFailure("Unsupported router firmware version.");
         var hash=(await router.ExecuteAsync("sha256sum /usr/bin/rtp2.sh | awk '{print $1}'",ct)).Trim();
         if (hash != identity.Rtp2Hash || CompatibilityCatalog.Classify(hash) is Compatibility.Unknown or Compatibility.KnownIncompatible)
             throw new SafeFailure("Firmware changed or its compatibility is not established.");

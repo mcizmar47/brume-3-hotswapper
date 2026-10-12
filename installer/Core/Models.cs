@@ -50,6 +50,7 @@ public record InstallerConfiguration(RouterIdentity Router, VpnProfile Profile, 
 {
     public int RebootWindowStart { get; init; } = ConfigTemplates.MaintenanceHours.Start;
     public int RebootWindowEnd { get; init; } = ConfigTemplates.MaintenanceHours.End;
+    public bool AllowUnsupportedFirmware { get; init; }
     public override string ToString() => "Installer configuration (private values omitted)";
 }
 public record InstallationStep(string Name, bool ChangesRouter);

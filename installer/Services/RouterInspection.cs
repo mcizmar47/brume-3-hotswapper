@@ -188,7 +188,7 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
             var live = c.Router with { Model = board.RootElement.GetProperty("model").GetString() ?? "", Board = board.RootElement.GetProperty("board_name").GetString() ?? "" };
             if (!live.IsBrume) throw new SafeFailure("The connected device is not a GL-MT5000.");
             live = live with { Rtp2Hash = (await router.ExecuteAsync("sha256sum /usr/bin/rtp2.sh | awk '{print $1}'", ct)).Trim() };
-            await RouterPrerequisites.VerifyFirmwareAsync(router, live, ct);
+            await RouterPrerequisites.VerifyFirmwareAsync(router, live, c.AllowUnsupportedFirmware, ct);
             await RouterPrerequisites.VerifyCapabilitiesAsync(router, ct);
             operation = "VPN policy, slot ownership and profile membership";
             var (active, activePeer) = await VerifyPolicySlotsAsync(c.Profile, ct);

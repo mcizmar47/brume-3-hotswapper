@@ -1,76 +1,149 @@
 <Window x:Class="BrumeHotswapper.Installer.MainWindow"
- xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- xmlns:local="clr-namespace:BrumeHotswapper.Installer"
- Title="Brume 3 Hotswapper · Installer" Width="1100" Height="800" MinWidth="940" MinHeight="680"
- Background="#F5F6F8" Foreground="#202B39" FontFamily="Segoe UI" FontSize="14" WindowStartupLocation="CenterScreen">
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:BrumeHotswapper.Installer"
+        Title="Brume 3 Hotswapper" Width="1050" Height="790" MinWidth="910" MinHeight="680"
+        Background="#F4F6F8" Foreground="#202A36" FontFamily="Segoe UI" FontSize="14"
+        WindowStartupLocation="CenterScreen">
  <Window.Resources>
   <local:PageVisibilityConverter x:Key="Page"/>
   <BooleanToVisibilityConverter x:Key="Bool"/>
-  <Style TargetType="Button"><Setter Property="Padding" Value="18,9"/><Setter Property="Margin" Value="0,4,10,4"/><Setter Property="MinWidth" Value="90"/></Style>
-  <Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="Margin" Value="0,0,0,12"/></Style>
-  <Style TargetType="CheckBox"><Setter Property="Margin" Value="0,12,0,12"/><Setter Property="VerticalContentAlignment" Value="Center"/></Style>
-  <Style TargetType="TextBox"><Setter Property="Padding" Value="10"/><Setter Property="Margin" Value="0,4,0,12"/></Style>
-  <Style TargetType="PasswordBox"><Setter Property="Padding" Value="10"/><Setter Property="Margin" Value="0,4,0,12"/></Style>
+  <Style x:Key="SectionHeading" TargetType="TextBlock">
+   <Setter Property="FontSize" Value="19"/><Setter Property="FontWeight" Value="SemiBold"/>
+   <Setter Property="Margin" Value="0,0,0,12"/>
+  </Style>
+  <Style x:Key="SubtleText" TargetType="TextBlock">
+   <Setter Property="Foreground" Value="#526173"/><Setter Property="TextWrapping" Value="Wrap"/>
+  </Style>
+  <Style x:Key="NavButton" TargetType="Button">
+   <Setter Property="Padding" Value="19,9"/><Setter Property="MinWidth" Value="90"/>
+   <Setter Property="Margin" Value="0,0,10,0"/>
+  </Style>
+  <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource NavButton}">
+   <Setter Property="Background" Value="#225F77"/><Setter Property="Foreground" Value="White"/>
+   <Setter Property="Margin" Value="0"/><Setter Property="MinWidth" Value="110"/>
+  </Style>
+  <Style TargetType="TextBox">
+   <Setter Property="Padding" Value="9,7"/><Setter Property="BorderBrush" Value="#B6C1CC"/>
+  </Style>
+  <Style TargetType="PasswordBox">
+   <Setter Property="Padding" Value="9,7"/><Setter Property="BorderBrush" Value="#B6C1CC"/>
+  </Style>
+  <Style TargetType="Hyperlink">
+   <Setter Property="Foreground" Value="#156C97"/>
+  </Style>
+  <Style x:Key="InfoBubble" TargetType="Border">
+   <Setter Property="Background" Value="#E7EEF4"/><Setter Property="CornerRadius" Value="12"/>
+   <Setter Property="Width" Value="22"/><Setter Property="Height" Value="22"/>
+  </Style>
  </Window.Resources>
- <Grid Margin="30" Background="#F5F6F8">
-  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-  <StackPanel>
-   <DockPanel><TextBlock Text="BRUME 3 HOTSWAPPER" FontWeight="SemiBold" Foreground="#235F74"/><TextBlock Text="{Binding ModeLabel}" HorizontalAlignment="Right" FontSize="12" Foreground="#635229"/></DockPanel>
-   <TextBlock Text="{Binding StepLabel}" Foreground="#667386" FontSize="11" Margin="0,4,0,4"/>
-   <TextBlock Text="{Binding Title}" FontSize="30" FontWeight="SemiBold" Margin="0,0,0,22"/>
+
+ <Grid Margin="26">
+  <Grid.RowDefinitions>
+   <RowDefinition Height="Auto"/>
+   <RowDefinition Height="*"/>
+   <RowDefinition Height="Auto"/>
+   <RowDefinition Height="Auto"/>
+  </Grid.RowDefinitions>
+
+  <StackPanel Grid.Row="0" Margin="0,0,0,20">
+   <DockPanel LastChildFill="False" Margin="0,0,0,5">
+    <TextBlock Text="BRUME 3 HOTSWAPPER" Foreground="#225F77" FontWeight="SemiBold" FontSize="13" DockPanel.Dock="Left"/>
+    <TextBlock Text="{Binding ModeLabel}" Foreground="#677487" FontSize="12" DockPanel.Dock="Right"/>
+   </DockPanel>
+   <TextBlock Text="{Binding StepLabel}" Foreground="#657588" FontSize="12" Margin="0,3,0,3"/>
+   <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="30"/>
   </StackPanel>
-  <Border Grid.Row="1" Background="White" CornerRadius="8" Padding="24" BorderBrush="#DFE4E9" BorderThickness="1">
-   <Grid IsEnabled="{Binding Idle}">
+
+  <Border Grid.Row="1" Background="White" CornerRadius="9" BorderBrush="#DEE5EB" BorderThickness="1" Padding="26">
+   <Grid>
+    <!-- 1: PREREQUISITES -->
     <ScrollViewer VerticalScrollBarVisibility="Auto" Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=0}">
-     <StackPanel>
-      <TextBlock Text="Automatic VPN failover, configured in a few steps." FontSize="23" FontWeight="SemiBold"/>
-      <TextBlock Text="Find your Brume 3, read existing VPN connections, and arrange location pools into three failover tiers. Configure optional notifications and maintenance reboot guards."/>
-      <TextBlock Text="Before you begin" FontSize="18" FontWeight="SemiBold" Margin="0,20,0,12"/>
-      <TextBlock Text="Configure or import every VPN connection you want to use into the GL.iNet VPN List in your Brume administration panel first. This installer does not create a NordVPN account or import initial provider profiles."/>
-      <CheckBox IsChecked="{Binding Acknowledged}" Content="My VPN profiles are already in the GL.iNet VPN List."/>
+     <StackPanel MaxWidth="900" HorizontalAlignment="Left">
+      <TextBlock Text="Check hardware and software" Style="{StaticResource SectionHeading}"/>
+      <TextBlock Text="This tool is designed for GL.iNet Brume 3 (GL-MT5000)." Margin="0,0,0,7"/>
+      <TextBlock Margin="0,0,0,7" TextWrapping="Wrap">
+       <Run Text="Currently verified firmware versions: "/><Run Text="{Binding SupportedVersions}" FontWeight="SemiBold"/>
+      </TextBlock>
+      <TextBlock TextWrapping="Wrap">
+       <Run Text="If your router is on an older version, update it through the "/>
+       <Hyperlink NavigateUri="http://192.168.8.1/#/upgrade" RequestNavigate="OpenLink">Admin Panel</Hyperlink>
+       <Run Text=" or "/>
+       <Hyperlink NavigateUri="https://dl.gl-inet.com/router/mt5000/stable" RequestNavigate="OpenLink">download a specific compatible firmware version</Hyperlink><Run Text="."/>
+      </TextBlock>
+
+      <Separator Margin="0,25,0,24"/>
+      <TextBlock Text="Make sure your VPN profiles are set up" Style="{StaticResource SectionHeading}"/>
+      <TextBlock Margin="0,0,0,8" TextWrapping="Wrap"><Run Text="Go to: "/><Hyperlink NavigateUri="http://192.168.8.1/#/vpn-client" RequestNavigate="OpenLink">GL.iNet Admin Panel &gt; VPN &gt; VPN Client Profile</Hyperlink></TextBlock>
+      <TextBlock Margin="0,0,0,8" TextWrapping="Wrap">NOTE: You don't need to sort individual connections in the GL.iNet Admin Panel. Hotswapper uses the priorities you set here.</TextBlock>
+      <TextBlock TextWrapping="Wrap"><Run Text="Create at least one VPN tunnel in "/><Hyperlink NavigateUri="http://192.168.8.1/#/vpndashboard" RequestNavigate="OpenLink">GL.iNet Admin Panel &gt; VPN &gt; VPN Dashboard</Hyperlink><Run Text=". Include connections to at least two different geographic locations."/></TextBlock>
+
+      <Separator Margin="0,25,0,24"/>
+      <TextBlock Text="Disable auto-update" Style="{StaticResource SectionHeading}"/>
+      <TextBlock Text="Disable automatic firmware updates on the router. An update could break Hotswapper's GL.iNet integration." TextWrapping="Wrap" Margin="0,0,0,8"/>
+      <TextBlock Text="Before updating the router firmware, uninstall Hotswapper. This version does not include a one-click uninstaller." TextWrapping="Wrap"/>
      </StackPanel>
     </ScrollViewer>
-    <StackPanel Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=1}">
-     <TextBlock Text="Enter the router administrator password. It is session-only and is never saved or included in reports."/>
-     <TextBlock Text="Administrator password" Margin="0,12,0,0"/>
-     <PasswordBox x:Name="RouterPassword" MaxWidth="440" HorizontalAlignment="Left" Width="440"/>
-     <Button Content="Find my Brume 3" Click="FindRouter" HorizontalAlignment="Left"/>
-     <TextBlock Text="Checks local IPv4 gateways and subnet edge addresses with short timeouts; no subnet scan. At most four SSH authentication attempts, one per candidate. Manual IPv4 remains available." Foreground="#667386" Margin="0,12,0,22"/>
-     <Separator/><TextBlock Text="Manual fallback · router IPv4 address" Margin="0,22,0,0"/>
-     <TextBox Text="{Binding ManualAddress, UpdateSourceTrigger=PropertyChanged}" MaxWidth="440" HorizontalAlignment="Left" Width="440"/>
-     <Button Content="Try address" Click="TryRouter" HorizontalAlignment="Left"/>
+
+    <!-- 2.1: CONNECT -->
+    <StackPanel Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=1}" MaxWidth="550" HorizontalAlignment="Left" VerticalAlignment="Top"
+                IsVisibleChanged="ConnectPageVisibilityChanged">
+     <TextBlock Text="Connect to your Brume 3 using its local address and administrator password." TextWrapping="Wrap" Margin="0,0,0,22"/>
+     <TextBlock Text="Router address" FontWeight="SemiBold" Margin="0,0,0,5"/>
+     <TextBox Text="{Binding RouterAddress, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding IsDisconnected}" Margin="0,0,0,21" Width="420" HorizontalAlignment="Left"/>
+     <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+      <TextBlock Text="Admin password" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,10,0"/>
+       <Border Style="{StaticResource InfoBubble}" ToolTip="Brume 3 has no default admin password. Use the password you chose during first-time setup, not a Wi-Fi password.">
+       <TextBlock Text="?" FontWeight="SemiBold" Foreground="#225F77" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>
+     </StackPanel>
+     <PasswordBox x:Name="RouterPassword" Width="420" HorizontalAlignment="Left" IsEnabled="{Binding IsDisconnected}"/>
+     <TextBlock Text="{Binding ConnectionSummary}" Style="{StaticResource SubtleText}" Margin="0,21,0,0"/>
     </StackPanel>
-    <StackPanel Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=2}">
-     <TextBlock Text="Only GL.iNet Brume 3 / GL-MT5000 is supported." FontSize="19" FontWeight="SemiBold"/>
-     <TextBlock Text="{Binding DeviceSummary}" Margin="0,20,0,0"/>
-    </StackPanel>
-    <ScrollViewer VerticalScrollBarVisibility="Auto" Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=3}">
-     <StackPanel>
-      <TextBlock Text="Firmware version and VPN reconciliation compatibility are checked independently."/>
-      <TextBlock Text="{Binding CompatibilitySummary}" FontSize="15"/>
-      <Expander Header="Technical details" Margin="0,10"><TextBlock Text="{Binding CompatibilityDetails}" FontFamily="Consolas" FontSize="12"/></Expander>
-      <TextBlock Text="Installation requires a verified compatible reconciliation hash." Margin="4,0"/>
+
+    <!-- 2.2: COMPATIBILITY (only shown when the connection needs attention) -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=2}">
+     <StackPanel MaxWidth="820" HorizontalAlignment="Left">
+      <TextBlock Text="{Binding CompatibilityHeadline}" FontSize="19" FontWeight="SemiBold" Margin="0,0,0,17" TextWrapping="Wrap"/>
+      <TextBlock Text="{Binding CompatibilityDescription}" TextWrapping="Wrap" Margin="0,0,0,15"/>
+      <StackPanel Visibility="{Binding ShowVpnHelp, Converter={StaticResource Bool}}" Margin="0,3,0,20">
+       <TextBlock TextWrapping="Wrap" Margin="0,0,0,7"><Run Text="Set up VPN profiles: "/><Hyperlink NavigateUri="http://192.168.8.1/#/vpn-client" RequestNavigate="OpenLink">GL.iNet Admin Panel &gt; VPN &gt; VPN Client Profile</Hyperlink></TextBlock>
+       <TextBlock TextWrapping="Wrap"><Run Text="Then create and activate a tunnel: "/><Hyperlink NavigateUri="http://192.168.8.1/#/vpndashboard" RequestNavigate="OpenLink">GL.iNet Admin Panel &gt; VPN &gt; VPN Dashboard</Hyperlink></TextBlock>
+       <TextBlock Text="You don't need to sort individual connection preferences in the Admin Panel; Hotswapper uses the tier order you set here." Margin="0,9,0,0" TextWrapping="Wrap"/>
+      </StackPanel>
+      <StackPanel Visibility="{Binding ShowFirmwareHelp, Converter={StaticResource Bool}}" Margin="0,3,0,20">
+       <TextBlock TextWrapping="Wrap" Margin="0,0,0,8"><Run Text="Verified versions: "/><Run Text="{Binding SupportedVersions}" FontWeight="SemiBold"/></TextBlock>
+       <TextBlock TextWrapping="Wrap"><Run Text="Update from the "/><Hyperlink NavigateUri="http://192.168.8.1/#/upgrade" RequestNavigate="OpenLink">Admin Panel</Hyperlink><Run Text=" or "/><Hyperlink NavigateUri="https://dl.gl-inet.com/router/mt5000/stable" RequestNavigate="OpenLink">download a compatible firmware image</Hyperlink><Run Text="."/></TextBlock>
+      </StackPanel>
+      <CheckBox IsChecked="{Binding AcceptUnsupportedFirmware}" Visibility="{Binding ShowFirmwareOverride, Converter={StaticResource Bool}}" Margin="0,15,0,0" Content="I wish to proceed with installation on an unsupported firmware version."/>
+      <TextBlock Text="This only overrides the version check. If any required system file differs from the supported layout, installation will still stop before making changes." Style="{StaticResource SubtleText}" Margin="0,8,0,0" Visibility="{Binding ShowFirmwareOverride, Converter={StaticResource Bool}}"/>
      </StackPanel>
     </ScrollViewer>
-    <StackPanel Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=4}">
-     <TextBlock Text="Choose an existing VPN tunnel/profile to manage."/>
-     <ComboBox ItemsSource="{Binding Profiles}" SelectedItem="{Binding SelectedProfile}" DisplayMemberPath="Display" Padding="10" Margin="0,0,0,20"/>
-     <TextBlock Text="Your VPN locations" FontSize="19" FontWeight="SemiBold"/>
-     <TextBlock Text="Connections in the same country and city form one location pool. On the next page, choose the locations to use and put them in priority order."/>
-    </StackPanel>
-    <Grid Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=5}">
-     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-     <TextBlock Text="Drag cards between columns. Drop above or below a card to change priority. Top is preferred. Leave unused locations unassigned. Tier 2 stays sticky; Tier 3 can recover toward Tier 1 or 2."/>
-     <ItemsControl Grid.Row="1" ItemsSource="{Binding Tiers}">
+
+    <!-- 3: CONFIGURE TIERS -->
+    <Grid Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=3}">
+     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+     <StackPanel>
+      <TextBlock Margin="0,0,0,6" TextWrapping="Wrap"><Run FontWeight="SemiBold" Text="Tier 1: "/>Preferred connections.</TextBlock>
+      <TextBlock Margin="0,0,0,6" TextWrapping="Wrap"><Run FontWeight="SemiBold" Text="Tier 2: "/>Secondary preferred connections. After a downgrade from Tier 1, the router waits until the daily maintenance reboot to try returning to Tier 1.</TextBlock>
+      <TextBlock Margin="0,0,0,12" TextWrapping="Wrap"><Run FontWeight="SemiBold" Text="Tier 3: "/>Backup connections. The router actively attempts to return to Tier 1 or Tier 2.</TextBlock>
+     </StackPanel>
+     <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,12">
+      <TextBlock Text="VPN tunnel:" VerticalAlignment="Center" FontWeight="SemiBold" Margin="0,0,12,0"/>
+      <ComboBox ItemsSource="{Binding EligibleProfiles}" SelectedItem="{Binding SelectedProfile}" DisplayMemberPath="Display" Width="400" Padding="8,5"/>
+     </StackPanel>
+     <ItemsControl Grid.Row="2" ItemsSource="{Binding Tiers}">
       <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Columns="4"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
       <ItemsControl.ItemTemplate><DataTemplate>
-       <Border Background="#F3F5F7" CornerRadius="6" Margin="3" Padding="8">
-        <DockPanel><TextBlock DockPanel.Dock="Top" Text="{Binding Title}" FontWeight="SemiBold" FontSize="13"/>
-         <ListBox ItemsSource="{Binding Locations}" Background="Transparent" BorderThickness="0" AllowDrop="True" MinHeight="220"
-          PreviewMouseLeftButtonDown="CardMouseDown" PreviewMouseMove="CardMouseMove" Drop="CardDrop" DragOver="CardDragOver"
-          ScrollViewer.HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
-          <ListBox.ItemTemplate><DataTemplate><Border Background="White" BorderBrush="#D7E0E7" BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,3">
-           <StackPanel><TextBlock Text="{Binding Label}" FontWeight="SemiBold" Margin="0,0,0,6"/><TextBlock Text="{Binding CountLabel}" FontSize="12" Foreground="#657184" Margin="0"/></StackPanel>
+       <Border Background="#F4F6F8" BorderBrush="#DDE4EC" BorderThickness="1" CornerRadius="6" Margin="4" Padding="9">
+        <DockPanel LastChildFill="True">
+         <TextBlock DockPanel.Dock="Top" Text="{Binding Title}" FontWeight="SemiBold" Margin="0,0,0,12" FontSize="13" TextWrapping="Wrap"/>
+         <ListBox ItemsSource="{Binding Locations}" Background="Transparent" BorderThickness="0" AllowDrop="True" MinHeight="200"
+                  PreviewMouseLeftButtonDown="CardMouseDown" PreviewMouseMove="CardMouseMove" Drop="CardDrop" DragOver="CardDragOver"
+                  ScrollViewer.HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+          <ListBox.ItemTemplate><DataTemplate><Border Background="White" BorderBrush="#D5DFE8" BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,3">
+           <StackPanel><TextBlock Text="{Binding Label}" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,5"/>
+            <TextBlock Text="{Binding CountLabel}" FontSize="12" Foreground="#657488"/></StackPanel>
           </Border></DataTemplate></ListBox.ItemTemplate>
          </ListBox>
         </DockPanel>
@@ -78,41 +151,75 @@
       </DataTemplate></ItemsControl.ItemTemplate>
      </ItemsControl>
     </Grid>
-    <StackPanel Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=6}">
-     <TextBlock Text="Optional ntfy notifications" FontSize="19" FontWeight="SemiBold"/>
-     <TextBlock Text="Notify on major tier changes. Moves between locations in the same tier stay silent."/>
-     <CheckBox IsChecked="{Binding Notifications}" Content="Configure notifications"/>
-     <TextBlock Text="ntfy topic or URL"/>
-     <TextBox Text="{Binding NtfyUrl, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding Notifications}"/>
-     <Button Content="Test notification" Command="{Binding TestNotificationCommand}" HorizontalAlignment="Left"/>
-     <TextBlock Text="The test is sent from this PC. Your private URL is kept only for this session and stored securely on the router when you install." Foreground="#667386" Margin="0,18,0,0"/>
-    </StackPanel>
-    <DockPanel Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=7}">
-     <StackPanel DockPanel.Dock="Top">
-      <CheckBox IsChecked="{Binding Maintenance}" Content="Enable automatic maintenance reboots"/>
-      <TextBlock Text="Select devices that should prevent an automatic maintenance reboot while online. Avoid phones, servers, smart-home devices and other normally always-on devices: they may prevent every reboot opportunity."/>
-      <StackPanel Orientation="Horizontal" IsEnabled="{Binding Maintenance}" Margin="0,8">
-       <TextBlock Text="From:" VerticalAlignment="Center" Margin="0,0,8,0"/>
-       <ComboBox ItemsSource="{Binding Hours}" SelectedIndex="{Binding RebootWindowStart}" Width="95"/>
-       <TextBlock Text="To:" VerticalAlignment="Center" Margin="20,0,8,0"/>
-       <ComboBox ItemsSource="{Binding Hours}" SelectedIndex="{Binding RebootWindowEnd}" Width="95"/>
+
+    <!-- 4: TIER 1 RECOVERY -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=4}">
+     <StackPanel MaxWidth="900" HorizontalAlignment="Left">
+      <TextBlock Text="Enter when the router may reboot." FontWeight="SemiBold" Margin="0,0,0,8"/>
+      <TextBlock Text="To minimize downtime, recovery from Tier 2 to Tier 1 is scheduled around a daily maintenance reboot. The router attempts recovery before rebooting." TextWrapping="Wrap" Margin="0,0,0,20"/>
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,24">
+       <TextBlock Text="Attempt reboot from:" VerticalAlignment="Center" Margin="0,0,12,0"/>
+       <TextBox Text="{Binding RebootStartText, UpdateSourceTrigger=PropertyChanged}" Width="48" MaxLength="2" HorizontalContentAlignment="Center" PreviewTextInput="HourInput" DataObject.Pasting="HourPaste"/>
+       <TextBlock Text="to" VerticalAlignment="Center" Margin="12,0"/>
+       <TextBox Text="{Binding RebootEndText, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding HasGuards}" Width="48" MaxLength="2" HorizontalContentAlignment="Center" PreviewTextInput="HourInput" DataObject.Pasting="HourPaste"/>
+       <Border Style="{StaticResource InfoBubble}" Margin="12,0,0,0" ToolTip="24-hour format: 00–23 (for example, 2 PM = 14). With no protected devices, the router attempts one reboot at the first hour.">
+        <TextBlock Text="?" Foreground="#225F77" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+       </Border>
       </StackPanel>
-      <TextBlock Text="Hourly within this same-day window (router time), at most once daily. The script is installed even when scheduling is disabled. Zero selected devices is valid." Foreground="#667386"/>
+      <TextBlock Text="Devices that block a reboot" Style="{StaticResource SectionHeading}"/>
+      <TextBlock Text="During the selected time window, the router checks whether any protected device is online. If one is detected, reboot is postponed." TextWrapping="Wrap" Margin="0,0,0,8"/>
+      <TextBlock TextWrapping="Wrap" Margin="0,0,0,8"><Run Text="Each device must already have a reserved IP address. Add or check reservations "/><Hyperlink NavigateUri="http://192.168.8.1/#/lanip" RequestNavigate="OpenLink">here</Hyperlink><Run Text=" (Address Reservation, using the device's MAC address)."/></TextBlock>
+      <TextBlock Text="If you just added a reservation, go Back and then Continue to refresh the router's address list." TextWrapping="Wrap" Margin="0,0,0,8"/>
+      <TextBlock Text="Avoid always-on devices such as phones and servers: they could prevent every reboot." TextWrapping="Wrap" Margin="0,0,0,17"/>
+      <Border BorderBrush="#DFE6EC" BorderThickness="1" CornerRadius="5" Padding="12" MaxWidth="660" HorizontalAlignment="Left">
+       <StackPanel>
+        <Grid Margin="0,0,0,9"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <TextBlock Text="Reserved device IPv4 address" FontWeight="SemiBold" VerticalAlignment="Center"/>
+         <Button Grid.Column="1" Content="+ Add IP" Command="{Binding AddGuardCommand}" Padding="12,6"/>
+        </Grid>
+        <ItemsControl ItemsSource="{Binding GuardEntries}">
+         <ItemsControl.ItemTemplate><DataTemplate><DockPanel LastChildFill="True" Margin="0,0,0,8">
+          <Button DockPanel.Dock="Right" Content="−" ToolTip="Remove this address" Click="RemoveGuard" Tag="{Binding}" Margin="10,0,0,0" Padding="12,4"/>
+          <TextBox Text="{Binding Address, UpdateSourceTrigger=PropertyChanged}" Padding="9,5"/>
+         </DockPanel></DataTemplate></ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <TextBlock Text="{Binding GuardHint}" Style="{StaticResource SubtleText}"/>
+       </StackPanel>
+      </Border>
      </StackPanel>
-     <ListBox ItemsSource="{Binding Clients}" IsEnabled="{Binding Maintenance}" BorderBrush="#DFE4E9">
-      <ListBox.ItemTemplate><DataTemplate><CheckBox IsChecked="{Binding Selected}" Content="{Binding Display}"/></DataTemplate></ListBox.ItemTemplate>
-     </ListBox>
-    </DockPanel>
-    <ScrollViewer VerticalScrollBarVisibility="Auto" Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=8}"><TextBlock Text="{Binding Review}"/></ScrollViewer>
-    <StackPanel Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=9}"><TextBlock Text="Applying the reviewed installation plan…"/><ItemsControl ItemsSource="{Binding Progress}"/></StackPanel>
-    <StackPanel Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=10}"><TextBlock Text="Post-install checks" FontSize="19" FontWeight="SemiBold"/><TextBlock Text="Validation does not force failover or reboot."/><ItemsControl ItemsSource="{Binding Validation}"/></StackPanel>
-    <StackPanel Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=11}"><TextBlock Text="{Binding Status}" FontSize="22" FontWeight="SemiBold"/><ItemsControl ItemsSource="{Binding Validation}" Margin="0,15"/><TextBlock Text="Copy or save a sanitized report using the buttons below."/></StackPanel>
+    </ScrollViewer>
+
+    <!-- 5: INSTALLATION -->
+    <Grid Visibility="{Binding Page, Converter={StaticResource Page}, ConverterParameter=5}">
+     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+     <TextBlock Text="{Binding InstallationHeadline}" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,16"/>
+     <ProgressBar Grid.Row="1" Height="6" IsIndeterminate="{Binding Busy}" Margin="0,0,0,18"/>
+     <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+      <ItemsControl ItemsSource="{Binding Progress}">
+       <ItemsControl.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap" Margin="0,0,0,8"/></DataTemplate></ItemsControl.ItemTemplate>
+      </ItemsControl>
+     </ScrollViewer>
+    </Grid>
    </Grid>
   </Border>
-  <StackPanel Grid.Row="2" Margin="0,15,0,10"><ProgressBar Height="3" IsIndeterminate="{Binding Busy}" Visibility="{Binding Busy, Converter={StaticResource Bool}}" Margin="0,0,0,10"/><TextBlock Text="{Binding Status}" Margin="0" Foreground="#49566A"/></StackPanel>
-  <DockPanel Grid.Row="3">
-   <StackPanel Orientation="Horizontal" DockPanel.Dock="Left"><Button Content="Copy report" Click="CopyReport"/><Button Content="Save report" Click="SaveReport"/></StackPanel>
-   <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="Cancel operation" Command="{Binding CancelCommand}"/><Button Content="← Back" Command="{Binding BackCommand}"/><Button Content="{Binding NextLabel}" Command="{Binding NextCommand}" Background="#235F74" Foreground="White"/></StackPanel>
-  </DockPanel>
+
+  <TextBlock Grid.Row="2" Text="{Binding Status}" Style="{StaticResource SubtleText}" Margin="2,12,0,14" FontSize="12"/>
+
+  <Grid Grid.Row="3" MinHeight="43">
+   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+   <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+    <Button Content="Back" Command="{Binding BackCommand}" Visibility="{Binding ShowBack, Converter={StaticResource Bool}}" Style="{StaticResource NavButton}"/>
+    <Button Content="Cancel" Click="CloseInstaller" Visibility="{Binding ShowCancel, Converter={StaticResource Bool}}" Style="{StaticResource NavButton}"/>
+    <TextBlock Visibility="{Binding ShowSaveLog, Converter={StaticResource Bool}}" VerticalAlignment="Center">
+     <Hyperlink Click="SaveInstallationLog">Save Installation Log</Hyperlink>
+    </TextBlock>
+   </StackPanel>
+   <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+    <Button Content="{Binding DisconnectLabel}" Command="{Binding DisconnectCommand}" Style="{StaticResource NavButton}" Visibility="{Binding ShowConnectionStatus, Converter={StaticResource Bool}}"/>
+    <Button Content="{Binding ConnectionButtonLabel}" Click="ConnectRouter" IsEnabled="{Binding CanConnect}" Style="{StaticResource PrimaryButton}" Visibility="{Binding ShowConnect, Converter={StaticResource Bool}}"/>
+    <Button Content="{Binding PrimaryLabel}" Command="{Binding PrimaryCommand}" Style="{StaticResource PrimaryButton}" Visibility="{Binding ShowPrimary, Converter={StaticResource Bool}}"/>
+    <Button Content="Close" Click="CloseInstaller" IsEnabled="{Binding Idle}" Style="{StaticResource PrimaryButton}" Visibility="{Binding ShowSaveLog, Converter={StaticResource Bool}}"/>
+   </StackPanel>
+  </Grid>
  </Grid>
 </Window>

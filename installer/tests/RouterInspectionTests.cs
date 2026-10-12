@@ -16,7 +16,13 @@ public class RouterInspectionTests
         });
         Assert.Same(profiles[0],VpnDiscovery.AutoSelect([profiles[0]]));
     }
-    private class DiscoveryRouter : IRouterTransport
+    [Fact] public async Task EmptyTunnelIsStillDiscoveredForCompatibilityFeedback()
+    {
+        var profiles = await new VpnDiscovery(new DiscoveryRouter(emptySecondTunnel: true)).DiscoverAsync(default);
+        Assert.Equal(2, profiles.Count);
+        Assert.Empty(profiles[1].Connections);
+    }
+    private class DiscoveryRouter(bool emptySecondTunnel = false) : IRouterTransport
     {
         public List<string> Commands=[];
         public Task UploadAsync(string p,string c,CancellationToken ct)=>throw new Exception("Discovery must not write");
@@ -30,7 +36,7 @@ public class RouterInspectionTests
                 "uci -q get route_policy.policyA.group_id || true"=>"71",
                 "uci -q get route_policy.policyB.group_id || true"=>"72",
                 var c when c.Contains("profile901")=>"peer_501\n",
-                var c when c.Contains("profile902")=>"peer_502\n",
+                var c when c.Contains("profile902")=>emptySecondTunnel ? "" : "peer_502\n",
                 "uci -q get wireguard.peer_501.group_id || true"=>"71",
                 "uci -q get wireguard.peer_502.group_id || true"=>"72",
                 "uci -q get wireguard.peer_501.location || true"=>"Fictionland,Example",

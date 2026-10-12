@@ -142,6 +142,7 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
         if (ConfigurationGenerator.PrivateConfig(c) != ConfigurationGenerator.PrivateConfig(reviewedPlan.Configuration) ||
             ConfigurationGenerator.Locations(c) != ConfigurationGenerator.Locations(reviewedPlan.Configuration) ||
             c.Maintenance != reviewedPlan.Configuration.Maintenance ||
+            c.AllowUnsupportedFirmware != reviewedPlan.Configuration.AllowUnsupportedFirmware ||
             ConfigurationGenerator.Housekeeping(c) != ConfigurationGenerator.Housekeeping(reviewedPlan.Configuration) ||
             !c.Guards.Select(d => d.Mac.ToLowerInvariant()).Order().SequenceEqual(reviewedPlan.Configuration.Guards.Select(d => d.Mac.ToLowerInvariant()).Order()))
             throw new SafeFailure("The wizard choices changed. Review the updated plan before installing.");

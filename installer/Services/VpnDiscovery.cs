@@ -37,7 +37,7 @@ public sealed class VpnDiscovery(IRouterTransport router)
                 var location = (await router.ExecuteAsync($"uci -q get wireguard.{peer}.location || true", ct)).Trim();
                 connections.Add(new(peer[5..], name, location));
             }
-            if (connections.Count > 0) profiles.Add(new(profile.TunnelId, group, connections, profile.PolicySection));
+            profiles.Add(new(profile.TunnelId, group, connections, profile.PolicySection));
         }
         return profiles;
     }
