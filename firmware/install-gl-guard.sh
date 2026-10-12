@@ -11,6 +11,7 @@ previous_coordinated() {
     case "$1:$2" in
         rtp:84339bc25c130a0c2b31dae698bae1b224d0fc58074964a0ade37a8b84b060e1) return 0;;
         instances:184793a110dc0c728fa18f5857ea05d3f5efb432b142ac89da50cd8708bc909d) return 0;;
+        keyup:143515a9220c98b718ca3befcd6c201585c630166dc528f4a54905554a1177c2) return 0;;
         setup:0e727b62335ece0338db37b80ec781ca703b203bc1910983713636a8cfee61b5) return 0;;
         proto:fb6ca0fa6406c13bd68556f3fdcad775c56fe9620330d6878a6172947bae91c6) return 0;;
         firewall_event:0f9a66e076dfd530c0a1748652442503dc3a0557fed42daab2c59f170d283406) return 0;;

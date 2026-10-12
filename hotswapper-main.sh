@@ -670,6 +670,11 @@ prepare_iface() {
 
     i=0
     while [ "$i" -lt "$CONNECT_TIMEOUT" ]; do
+        # A delayed key-up event cannot complete a reused slot. If it arrived
+        # before this peer's handshake was visible, retry the guarded handler.
+        if [ "$(gl_iface_state "$iface")" = connecting ] && hs_keyup_ready "$iface"; then
+            slow_command env ACTION=KEYPAIR-CREATED ifname="$iface" /etc/hotplug.d/wireguard/ifup.sh || return 1
+        fi
         if iface_established_fresh "$iface"; then
             slow_command /usr/bin/rtp2.sh hotswapper_prepare "$iface" || return 1
             prepare_dataplane "$iface" || return 1

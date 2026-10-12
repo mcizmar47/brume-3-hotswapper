@@ -183,35 +183,50 @@ hs_permit() {
 }
 
 hs_drain_old_workers() {
-    local attempt=0 file command workers="" pid stamp actual busy
-    # Snapshot workers already executing old code. New patched workers wait on
-    # mutation.lock and must not make this drain wait for its own lock holders.
-    for file in "$HS_PROC"/[0-9]*/cmdline; do
-        [ "$file" != "$HS_PROC/$$/cmdline" ] && [ -r "$file" ] || continue
-        command=$(tr '\000' '\n' < "$file" | awk '
-            NR==1 && ($0=="/bin/sh" || $0=="/bin/ash" || $0=="sh" || $0=="ash" || $0=="/usr/bin/lua" || $0=="lua") {next}
-            {a[++n]=$0}
-            END {
-                if(a[1]=="/etc/rc.common") print a[2];
-                else if(a[1]=="/sbin/hotplug-call") print a[1] " " a[2];
-                else print a[1]
-            }')
-        case "$command" in
-            /usr/bin/rtp2.sh|/usr/bin/setup_instance|/usr/bin/setup_instance_via.lua|/usr/bin/tunnel-switch.sh|/lib/netifd/proto/wgclient.sh|/etc/hotplug.d/wireguard/ifup.sh|/etc/hotplug.d/wireguard/ifdown.sh|/etc/hotplug.d/iface/20-firewall|/etc/hotplug.d/iface/99-vpn-client-tunnel-switch|/etc/init.d/firewall|'/sbin/hotplug-call iface'|'/sbin/hotplug-call wireguard')
-                pid=${file%/cmdline}; pid=${pid##*/}
-                stamp=$(awk '{print $22}' "$HS_PROC/$pid/stat" 2>/dev/null)
-                [ -z "$stamp" ] || workers="$workers $pid:$stamp"
-                ;;
-        esac
-    done
+    local attempt=0 quiet=0 file command pid stamp busy childstat child
+    # Check until the writer set stays empty across two scans. A delayed
+    # failover or firewall child may start while the previous scan is running.
     while [ "$attempt" -lt 60 ]; do
         busy=0
-        for command in $workers; do
-            pid=${command%:*}; stamp=${command#*:}
-            actual=$(awk '{print $22}' "$HS_PROC/$pid/stat" 2>/dev/null)
-            [ "$actual" != "$stamp" ] || busy=1
+        for file in "$HS_PROC"/[0-9]*/cmdline; do
+            [ "$file" != "$HS_PROC/$$/cmdline" ] && [ -r "$file" ] || continue
+            command=$(tr '\000' '\n' < "$file" | awk '
+                NR==1 && ($0=="/bin/sh" || $0=="/bin/ash" || $0=="sh" || $0=="ash" || $0=="/usr/bin/lua" || $0=="lua") {next}
+                {a[++n]=$0}
+                END {
+                    if(a[1]=="/etc/rc.common") print a[2];
+                    else if(a[1]=="/sbin/hotplug-call") print a[1] " " a[2];
+                    else print a[1]
+                }')
+            case "$command" in
+                /usr/bin/rtp2.sh|/usr/bin/setup_instance|/usr/bin/setup_instance_via.lua|/usr/bin/tunnel-switch.sh|/usr/bin/vpn-failover-trigger.sh|/usr/bin/vpn-failover-watcher.sh|/lib/netifd/proto/wgclient.sh|/etc/hotplug.d/wireguard/ifup.sh|/etc/hotplug.d/wireguard/ifdown.sh|/etc/hotplug.d/iface/20-firewall|/etc/hotplug.d/iface/99-vpn-client-tunnel-switch|/etc/init.d/firewall|'/sbin/hotplug-call iface'|'/sbin/hotplug-call wireguard'|fw3|/usr/sbin/fw3|iptables|/usr/sbin/iptables|iptables-restore|/usr/sbin/iptables-restore|uci|/sbin/uci)
+                    pid=${file%/cmdline}; pid=${pid##*/}
+                    # Patched writers already opened mutation.lock and cannot
+                    # pass it while this drain holds the lock.
+                    [ "$(readlink "$HS_PROC/$pid/fd/9" 2>/dev/null)" != "$HS_DIR/mutation.lock" ] || continue
+                    case "$command" in '/sbin/hotplug-call '*)
+                        # hotplug-call waits for each hook's subshell. Do not
+                        # wait on its parent when that child is lock-blocked.
+                        for childstat in "$HS_PROC"/[0-9]*/stat; do
+                            [ -r "$childstat" ] || continue
+                            [ "$(awk '{print $4}' "$childstat")" = "$pid" ] || continue
+                            child=${childstat%/stat}; child=${child##*/}
+                            [ "$(readlink "$HS_PROC/$child/fd/9" 2>/dev/null)" != "$HS_DIR/mutation.lock" ] && continue
+                            continue 2
+                        done
+                        ;;
+                    esac
+                    stamp=$(awk '{print $22}' "$HS_PROC/$pid/stat" 2>/dev/null)
+                    [ -z "$stamp" ] || busy=1
+                    ;;
+            esac
         done
-        [ "$busy" = 1 ] || return 0
+        if [ "$busy" = 0 ]; then
+            quiet=$((quiet + 1))
+            [ "$quiet" -lt 2 ] || return 0
+        else
+            quiet=0
+        fi
         busybox usleep 500000 || return 1
         attempt=$((attempt + 1))
     done
@@ -250,6 +265,17 @@ hs_peer_matches() {
     [ -n "$expected" ] && [ "$expected" = "$actual" ] || return 1
     # Bookkeeping uses current config; path readiness is proved separately.
     return 0
+}
+
+hs_keyup_ready() {
+    local iface="$1" peer group tunnel generation index key
+    hs_peer_matches "$iface" || return 1
+    read -r peer group tunnel generation index < "$HS_DIR/owned.$iface" || return 1
+    key=$(uci -q get "wireguard.peer_$peer.public_key") || return 1
+    wg show "$iface" latest-handshakes 2>/dev/null | awk -v key="$key" '
+        $1 == key && $2 ~ /^[0-9]+$/ && $2 > 0 { found=1 }
+        END { exit !found }
+    '
 }
 
 case "$0" in

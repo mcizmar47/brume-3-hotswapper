@@ -56,7 +56,7 @@ echo peer_22 > config
 echo 4:9 > tunnel
 """
             body += '\n'.join(function(n).replace('/sys/class/net/', './sys/') for n in names)+'\n'
-            body += '\n'.join(function(n,HELPER) for n in helpers)+'\n'+code
+            body += '\n'.join(function(n,HELPER).replace('/sys/class/net/', './sys/') for n in helpers)+'\n'+code
             script=Path(tmp)/'case.sh'
             script.write_text(body,encoding='utf-8',newline='\n')
             r=subprocess.run([SH,str(script)],capture_output=True,text=True,timeout=15)
@@ -120,6 +120,27 @@ record_readiness() { echo recorded > recorded; }
 refresh_standby_health
 [ -f probed ] && [ -f recorded ] && [ "$NEXT_STANDBY_CHECK" = 14000 ]
 """)
+
+    def test_keyup_requires_current_peer_handshake(self):
+        self.shell([],r"""
+mkdir -p sys/wgclient2
+echo 12 > sys/wgclient2/ifindex
+wg() {
+    case "$3" in peers) cat current-peer;; latest-handshakes) cat handshakes;; esac
+}
+printf 'synthetic-key\n' > current-peer
+printf 'synthetic-key 95\n' > handshakes
+hs_keyup_ready wgclient2 || exit 10
+printf 'synthetic-key 0\n' > handshakes
+hs_keyup_ready wgclient2 && exit 11
+printf 'old-key 95\n' > handshakes
+hs_keyup_ready wgclient2 && exit 12
+echo 14 > sys/wgclient2/ifindex
+printf 'synthetic-key 95\n' > handshakes
+hs_keyup_ready wgclient2 && exit 13
+echo 12 > sys/wgclient2/ifindex
+hs_keyup_ready wgclient2 || exit 14
+""", helpers=('hs_peer_matches','hs_keyup_ready'))
 
     def test_inflight_probe_cannot_certify_new_generation_or_firewall(self):
         self.shell(['readiness_token','record_readiness'],r"""

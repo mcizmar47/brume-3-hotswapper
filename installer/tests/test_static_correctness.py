@@ -19,7 +19,7 @@ busybox() {
     case "$1" in
         flock)
             shift
-            perl -e 'my $op=2; my $fd; for(@ARGV) { $op=1 if $_ eq "-s"; $op=8 if $_ eq "-u"; $fd=$_ if /^\d+$/; } $op|=4 unless $op==8; open(my $fh,"+<&=$fd") or exit 2; exit(flock($fh,$op)?0:1);' -- "$@";;
+            perl -e 'my $op=2; my $fd; my $nonblock=0; for(@ARGV) { $op=1 if $_ eq "-s"; $op=8 if $_ eq "-u"; $nonblock=1 if $_ eq "-n"; $fd=$_ if /^\d+$/; } $op|=4 if $nonblock; open(my $fh,"+<&=$fd") or exit 2; exit(flock($fh,$op)?0:1);' -- "$@";;
         usleep) sleep 0.01;;
         *) return 1;;
     esac
@@ -89,12 +89,68 @@ printf '/bin/sh\000-c\000echo /usr/bin/rtp2.sh\000' > proc/124/cmdline
 cp proc/123/stat proc/124/stat
 busybox() { echo wait >> waits; rm -f proc/123/stat; }
 hs_drain_old_workers || exit 1
-[ "$(wc -l < waits)" = 1 ] || exit 2
+[ "$(wc -l < waits)" -ge 2 ] || exit 2
 cp proc/124/stat proc/123/stat
 busybox() { :; }
 hs_drain_old_workers && exit 3
 exit 0
 """)
+
+    def test_worker_drain_rescans_for_late_failover_child(self):
+        self.run_shell(function("hs_drain_old_workers", HELPER) + r"""
+HS_PROC=./proc; mkdir -p proc/125
+busybox() {
+    waits=$(( ${waits:-0} + 1 ))
+    if [ "$waits" -eq 1 ]; then
+        printf '/bin/sh\000/usr/bin/vpn-failover-trigger.sh\000trigger\000' > proc/125/cmdline
+        awk 'BEGIN {for(i=1;i<=22;i++) printf "%s%s", (i==22?"17":"0"),(i==22?"\n":" ")}' > proc/125/stat
+    fi
+    [ "$waits" -ne 2 ] || rm -f proc/125/cmdline proc/125/stat
+}
+hs_drain_old_workers || exit 1
+[ "$waits" -ge 3 ] || exit 2
+""")
+
+    def test_worker_drain_does_not_wait_on_patched_lock_waiter(self):
+        self.run_shell(function("hs_drain_old_workers", HELPER) + r"""
+HS_PROC=./proc; HS_DIR=./runtime; mkdir -p proc/125
+printf '/bin/sh\000/usr/bin/tunnel-switch.sh\0004\000' > proc/125/cmdline
+awk 'BEGIN {for(i=1;i<=22;i++) printf "%s%s", (i==22?"17":"0"),(i==22?"\n":" ")}' > proc/125/stat
+readlink() { echo ./runtime/mutation.lock; }
+busybox() { :; }
+hs_drain_old_workers || exit 1
+""")
+
+    def test_worker_drain_skips_hotplug_parent_of_lock_waiter(self):
+        self.run_shell(function("hs_drain_old_workers", HELPER) + r"""
+HS_PROC=./proc; HS_DIR=./runtime; mkdir -p proc/125 proc/126
+for pid in 125 126; do
+    printf '/bin/sh\000/sbin/hotplug-call\000iface\000' > "proc/$pid/cmdline"
+done
+awk 'BEGIN {for(i=1;i<=22;i++) printf "%s%s", (i==22?"17":"0"),(i==22?"\n":" ")}' > proc/125/stat
+awk 'BEGIN {for(i=1;i<=22;i++) printf "%s%s", (i==4?"125":(i==22?"18":"0")),(i==22?"\n":" ")}' > proc/126/stat
+readlink() { case "$1" in */126/fd/9) echo ./runtime/mutation.lock;; esac; }
+busybox() { :; }
+hs_drain_old_workers || exit 1
+""")
+
+    def test_keyup_patch_keeps_boot_marker_until_handshake(self):
+        patch = (ROOT / "firmware/gl-patches.awk").read_text()
+        installer = (ROOT / "firmware/install-gl-guard.sh").read_text()
+        self.assertIn('keyup:143515a9220c98b718ca3befcd6c201585c630166dc528f4a54905554a1177c2)', installer)
+        guard = json.loads(re.search(r'replacement\[2\] = (.+)', patch.split('if (target == "keyup") {')[1])[1])
+        self.assertLess(guard.index('hs_keyup_ready "$ifname"'), guard.index('rm -f /tmp/wireguard/'))
+        self.assertIn('[ -e "$HS_DIR/owned.$ifname" ]', guard)
+        self.assertIn('then hs_wake; exit 0; fi', guard)
+        main = (ROOT / "hotswapper-main.sh").read_text()
+        self.assertIn('slow_command env ACTION=KEYPAIR-CREATED ifname="$iface" /etc/hotplug.d/wireguard/ifup.sh', main)
+        guard = guard.replace('rm -f /tmp/wireguard/"${ifname}"_boot', 'echo cleared > boot')
+        self.run_shell('HS_DIR=.; ifname=wgclient2; echo identity > owned.wgclient2\n'
+                       'hs_lock() { :; }; hs_daemon_alive() { :; }; hs_wake() { :; }\n'
+                       'hs_keyup_ready() { [ -f current-handshake ]; }\n'
+                       'handler() {\n' + guard + '\n}\n'
+                       '(handler); [ ! -f boot ] || exit 1\n'
+                       ': > current-handshake\n(handler); [ -f boot ] || exit 2\n')
 
     def test_firmware_lock_precedes_procd(self):
         patches = (ROOT / "firmware/gl-patches.awk").read_text()
@@ -197,6 +253,55 @@ read -r release
     def test_daemon_single_instance_and_crash_release(self): self.lifetime_lock("daemon")
     def test_supervisor_crash_release(self): self.lifetime_lock("supervisor")
     def test_installer_session_crash_release(self): self.lifetime_lock("installer")
+
+    def test_lost_installer_channel_waits_for_command_and_rejects_stale_upload(self):
+        if not shutil.which("perl"):
+            self.skipTest("Perl host flock unavailable")
+        text = (ROOT / "installer/Services/SshInstallerLock.cs").read_text()
+        def constant(name):
+            return json.loads(re.search(r'public const string ' + name + r' = (".*");', text)[1])
+        session = constant("Command").replace("/tmp/hotswapper", "./runtime")
+        operation = constant("OperationPrefix").replace("/tmp/hotswapper", "./runtime")
+        with tempfile.TemporaryDirectory(prefix="hotswapper-installer-ops-") as folder:
+            folder = Path(folder)
+            def script(name, body):
+                path = folder / name
+                path.write_text(FLOCK + "\n" + body + "\n", newline="\n")
+                return path
+            holder_a = script("holder-a.sh", session.replace("__TOKEN__", "aaa"))
+            holder_b = script("holder-b.sh", session.replace("__TOKEN__", "bbb"))
+            running = script("running.sh", operation.replace("__TOKEN__", "aaa") + "touch started; sleep 1; echo done > completed")
+            stale = script("stale.sh", operation.replace("__TOKEN__", "aaa") + "echo bad > published")
+            publish = script("publish.sh", operation.replace("__TOKEN__", "bbb") + "mv staged published")
+            a = subprocess.Popen([SH, holder_a.as_posix()], cwd=folder, stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            b = None
+            try:
+                self.assertEqual(a.stdout.readline().strip(), "LOCKED")
+                operation_process = subprocess.Popen([SH, running.as_posix()], cwd=folder)
+                for _ in range(50):
+                    if (folder / "started").exists(): break
+                    time.sleep(0.02)
+                self.assertTrue((folder / "started").exists())
+                a.kill(); a.wait(timeout=5)
+                b = subprocess.Popen([SH, holder_b.as_posix()], cwd=folder, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                time.sleep(0.1)
+                self.assertEqual((folder / "runtime/installer.owner").read_text().strip(), "aaa")
+                self.assertFalse((folder / "completed").exists())
+                operation_process.wait(timeout=5)
+                self.assertEqual(b.stdout.readline().strip(), "LOCKED")
+                (folder / "staged").write_text("payload")
+                rejected = subprocess.run([SH, stale.as_posix()], cwd=folder, timeout=5)
+                self.assertNotEqual(rejected.returncode, 0)
+                accepted = subprocess.run([SH, publish.as_posix()], cwd=folder, timeout=5)
+                self.assertEqual(accepted.returncode, 0)
+                self.assertEqual((folder / "published").read_text(), "payload")
+            finally:
+                if a.poll() is None: a.kill()
+                if b is not None and b.poll() is None: b.kill()
+                a.communicate(timeout=5)
+                if b is not None: b.communicate(timeout=5)
 
 if __name__ == "__main__":
     unittest.main()

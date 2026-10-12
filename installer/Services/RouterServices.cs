@@ -111,10 +111,10 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
     }
     public async Task<string> ExecuteAsync(string command, CancellationToken ct)
     {
-        if (installerLock is { IsDisposed: false }) installerLock.EnsureHeld();
+        if (installerLock != null) command = installerLock.Guard(command);
         if (ssh?.IsConnected != true) throw new SafeFailure("The SSH session is disconnected. Reconnect to the router.");
         using var cmd = ssh.CreateCommand(command);
-        cmd.CommandTimeout = TimeSpan.FromSeconds(command == "/root/hotswapper/install-gl-guard.sh --install" ? 90 : 12);
+        cmd.CommandTimeout = TimeSpan.FromSeconds(command.EndsWith("/root/hotswapper/install-gl-guard.sh --install", StringComparison.Ordinal) ? 90 : 12);
         await cmd.ExecuteAsync(ct);
         if (cmd.ExitStatus != 0) throw new RouterCommandFailure(cmd.ExitStatus);
         if (cmd.Result.Length > 512_000) throw new SafeFailure("Router response exceeded the expected size.");
@@ -146,11 +146,12 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
             !c.Guards.Select(d => d.Mac.ToLowerInvariant()).Order().SequenceEqual(reviewedPlan.Configuration.Guards.Select(d => d.Mac.ToLowerInvariant()).Order()))
             throw new SafeFailure("The wizard choices changed. Review the updated plan before installing.");
         await ProbeUploadAsync(ct);
-        return await new RouterInstaller(this, new KillSwitchVerifier()).InstallAsync(reviewedPlan, progress, ct);
+        try { return await new RouterInstaller(this, new KillSwitchVerifier()).InstallAsync(reviewedPlan, progress, ct); }
+        finally { installerLock = null; }
     }
     public async Task UploadAsync(string path, string content, CancellationToken ct)
     {
-        if (installerLock is { IsDisposed: false }) installerLock.EnsureHeld();
+        installerLock?.EnsureHeld();
         RequireBrume();
         byte[] bytes = Encoding.UTF8.GetBytes(content);
         try { await (upload ??= new DeploymentUpload(this)).UploadAsync(path, bytes, ct); }
@@ -161,6 +162,7 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
     Task<string> IUploadChannel.CommandAsync(string command, CancellationToken ct) => ExecuteAsync(command, ct);
     async Task<string> IUploadChannel.StreamAsync(string command, ReadOnlyMemory<byte> bytes, CancellationToken ct)
     {
+        if (installerLock != null) command = installerLock.Guard(command);
         if (ssh?.IsConnected != true) throw new SafeFailure("SSH transport disconnected.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
@@ -199,6 +201,7 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
     }
     async Task IUploadChannel.SftpAsync(string path, ReadOnlyMemory<byte> bytes, CancellationToken ct)
     {
+        installerLock?.EnsureHeld();
         using var client = NewSftp(); await client.ConnectAsync(ct);
         byte[] copy = bytes.ToArray();
         try { using var stream = new MemoryStream(copy); await client.UploadFileAsync(stream, path, ct); }

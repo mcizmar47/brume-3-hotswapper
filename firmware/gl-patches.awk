@@ -75,7 +75,7 @@ BEGIN {
         anchor[1] = "#!/bin/sh"
         replacement[1] = "#!/bin/sh\n. /root/hotswapper/gl-coordination.sh || exit 1"
         anchor[2] = "\t\trm -f /tmp/wireguard/\"${ifname}\"_boot"
-        replacement[2] = "        hs_lock || exit 1\n        if hs_owned \"$ifname\" && ! hs_peer_matches \"$ifname\"; then hs_wake; exit 0; fi\n\t\trm -f /tmp/wireguard/\"${ifname}\"_boot"
+        replacement[2] = "        hs_lock || exit 1\n        if hs_daemon_alive && [ -e \"$HS_DIR/owned.$ifname\" ] && ! hs_keyup_ready \"$ifname\"; then hs_wake; exit 0; fi\n\t\trm -f /tmp/wireguard/\"${ifname}\"_boot"
         count = 2
     }
     if (target == "keydown") {
