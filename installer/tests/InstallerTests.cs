@@ -7,7 +7,7 @@ namespace BrumeHotswapper.Tests;
 public class InstallerTests
 {
     private sealed class DiscoverySession(RouterIdentity identity, IReadOnlyList<VpnProfile> profiles, bool failDiscovery = false,
-        IReadOnlySet<string>? activePolicies = null, bool filesKnown = true) : IRouterSession
+        IReadOnlySet<string>? activePolicies = null, bool filesKnown = true, string? inactiveReason = null) : IRouterSession
     {
         public bool IsDemo => true;
         public int FirmwareFileChecks { get; private set; }
@@ -25,7 +25,7 @@ public class InstallerTests
         {
             ct.ThrowIfCancellationRequested();
             if (activePolicies != null && !activePolicies.Contains(profile.PolicySection))
-                throw new SafeFailure("The selected VPN tunnel is not active.");
+                throw new SafeFailure(inactiveReason ?? "The selected VPN tunnel is not active.");
             return Task.CompletedTask;
         }
         public Task<IReadOnlyList<LanClient>> ClientsAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<LanClient>>([]);
@@ -81,8 +81,13 @@ public class InstallerTests
         Assert.Equal(1, vm.Page);
         Assert.True(vm.Connected);
         Assert.False(vm.CanConnect);
-        Assert.Equal("Connected", vm.ConnectionButtonLabel);
+        Assert.True(vm.CanToggleConnection);
+        Assert.Equal("Disconnect", vm.ConnectionButtonLabel);
         Assert.True(vm.PrimaryCommand.CanExecute(null)); // Can resume without disconnecting.
+        vm.Disconnect();
+        Assert.False(vm.Connected);
+        Assert.Equal("Connect", vm.ConnectionButtonLabel);
+        Assert.False(vm.PrimaryCommand.CanExecute(null));
     }
 
     [Fact] public async Task WrongDeviceTakesPriorityAndCannotContinue()
@@ -125,17 +130,35 @@ public class InstallerTests
         Assert.False(vm.Connected);
         Assert.True(vm.CanConnect);
         Assert.Contains("VPN discovery failed", vm.Status);
+        Assert.Contains("VPN discovery failed", vm.ErrorMessage);
+        Assert.True(vm.HasErrorMessage);
+    }
+
+    [Fact] public async Task SuccessfulRetryClearsTheConnectionError()
+    {
+        var attempts = 0;
+        var profile = Profile("Croatia,Zagreb", "Austria,Vienna");
+        using var vm = new WizardViewModel((_,_) => true, true, () =>
+            new DiscoverySession(Brume, [profile], failDiscovery: attempts++ == 0));
+        await Next(vm);
+        await vm.ConnectAsync("");
+        Assert.True(vm.HasErrorMessage);
+        await vm.ConnectAsync("");
+        Assert.Equal(3, vm.Page);
+        Assert.False(vm.HasErrorMessage);
     }
 
     [Fact] public async Task InactiveTunnelBlocksAtCompatibility()
     {
         var profile = Profile("Croatia,Zagreb", "Austria,Vienna") with { PolicySection = "inactive" };
+        const string reason = "WireGuard instance wgclient2 is occupied by another VPN list.";
         using var vm = new WizardViewModel((_,_) => true, true,
-            () => new DiscoverySession(Brume, [profile], activePolicies: new HashSet<string>()));
+            () => new DiscoverySession(Brume, [profile], activePolicies: new HashSet<string>(), inactiveReason: reason));
         await Next(vm); await vm.ConnectAsync("");
         Assert.Equal(2, vm.Page);
         Assert.True(vm.ShowVpnHelp);
         Assert.Contains("active", vm.CompatibilityHeadline);
+        Assert.Contains(reason, vm.CompatibilityDescription);
         Assert.Empty(vm.EligibleProfiles);
         Assert.False(vm.ShowPrimary);
     }

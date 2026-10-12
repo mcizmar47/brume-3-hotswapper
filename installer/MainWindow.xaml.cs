@@ -29,7 +29,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         vm = new WizardViewModel((address, fingerprint) => Dispatcher.Invoke(() => MessageBox.Show(this,
-            $"SSH host: {address}\n\n{fingerprint}\n\nVerify this fingerprint with your router before trusting it. Trust this key for this session? A changed key will be rejected.",
+            $"Check that this SSH fingerprint belongs to your router at {address}:\n\n{fingerprint}\n\nTrust it for this connection? Choose No if you cannot verify it.",
             "Verify SSH host key", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes));
         DataContext = vm;
         Closing += (_, e) =>
@@ -41,8 +41,14 @@ public partial class MainWindow : Window
         Closed += (_, _) => { RouterPassword.Clear(); vm.Dispose(); };
     }
     private void CloseInstaller(object sender, RoutedEventArgs e) => Close();
-    private async void ConnectRouter(object sender, RoutedEventArgs e)
+    private async void ToggleConnection(object sender, RoutedEventArgs e)
     {
+        if (vm.Connected)
+        {
+            vm.Disconnect();
+            RouterPassword.Clear();
+            return;
+        }
         try { await vm.ConnectAsync(RouterPassword.Password); }
         finally { RouterPassword.Clear(); }
     }

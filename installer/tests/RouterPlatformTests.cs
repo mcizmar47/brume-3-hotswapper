@@ -39,13 +39,15 @@ public class RouterPlatformTests
     }
     [Theory]
     [InlineData("ubus call system board","device identity and firmware")]
-    [InlineData("uci -q get route_policy.vpn.group_id","VPN policy, slot ownership and profile membership")]
+    [InlineData("uci -q get route_policy.vpn.group_id","the selected VPN group")]
     [InlineData("ip -4 rule show","selected VPN routing and GL enforcement")]
-    public async Task InspectionFailureUsesStaticStageNotRawCommand(string command,string stage)
+    public async Task InspectionFailureReportsCheckWithoutRawCommand(string command,string stage)
     {
         var router=new FailingTransport(command);
         var e=await Assert.ThrowsAsync<SafeFailure>(()=>new RouterInspection(router,new KillSwitchVerifier()).InspectAsync(InstallerFixture.Config(),default));
-        Assert.Equal($"Router inspection failed: {stage} (exit status 127); output withheld.",e.Message);
+        Assert.Contains(stage,e.Message);
+        Assert.Contains("exit status 127",e.Message);
+        Assert.Contains("output withheld",e.Message);
         Assert.DoesNotContain(command,e.Message);
     }
     private sealed class FailedUpload : IUploadChannel

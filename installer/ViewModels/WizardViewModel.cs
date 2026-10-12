@@ -33,11 +33,13 @@ public sealed class WizardViewModel : Observable, IDisposable
     private RouterIdentity? router;
     private VpnProfile? selectedProfile;
     private CompatibilityProblem problem;
+    private readonly List<string> vpnCheckFailures = [];
     private IReadOnlyList<LanClient> knownClients = [];
-    private bool connected, everConnected, busy, acceptUnsupportedFirmware, firmwareFilesKnown;
+    private bool connected, busy, acceptUnsupportedFirmware, firmwareFilesKnown;
     private bool installed;
     private int page;
     private string status = "Ready", routerAddress = "192.168.8.1", rebootStartText = "", rebootEndText = "";
+    private string errorMessage = "";
     private string installationHeadline = "Installing…";
     private readonly bool demo;
 
@@ -47,13 +49,11 @@ public sealed class WizardViewModel : Observable, IDisposable
         createSession = sessionFactory ?? (() => demo ? new DemoRouterSession() : new SshRouterSession(trust));
         BackCommand = new(Back, () => !Busy && Page is > 0 and < 5);
         PrimaryCommand = new(() => _ = RunAsync(NextAsync), CanContinue);
-        DisconnectCommand = new(Disconnect, () => !Busy && Page == 1 && Connected);
         AddGuardCommand = new(AddGuard, () => !Busy && Page == 4);
     }
 
     public RelayCommand BackCommand { get; }
     public RelayCommand PrimaryCommand { get; }
-    public RelayCommand DisconnectCommand { get; }
     public RelayCommand AddGuardCommand { get; }
     public string ModeLabel => demo ? "DEMO — no router changes" : "";
     public string SupportedVersions => string.Join(", ", CompatibilityCatalog.TestedFirmware.OrderBy(x => x));
@@ -68,16 +68,16 @@ public sealed class WizardViewModel : Observable, IDisposable
     public bool ShowPrimary => Page is 0 or 3 or 4 || Page == 1 && Connected || Page == 2 && problem == CompatibilityProblem.WrongFirmware;
     public bool ShowSaveLog => Page == 5;
     public bool ShowConnect => Page == 1;
-    public bool ShowConnectionStatus => Page == 1 && EverConnected;
     public bool Connected => connected;
-    public bool EverConnected => everConnected;
     public bool IsDisconnected => !Connected;
     public bool CanConnect => Page == 1 && !Busy && !Connected;
-    public string ConnectionButtonLabel => Connected ? "Connected" : "Connect";
-    public string DisconnectLabel => Connected ? "Disconnect" : "Disconnected";
+    public bool CanToggleConnection => Page == 1 && !Busy;
+    public string ConnectionButtonLabel => Connected ? "Disconnect" : "Connect";
     public string RouterAddress { get => routerAddress; set => Set(ref routerAddress, value); }
     public string ConnectionSummary => !Connected ? "Not connected." : $"Connected to {Router?.Model} at {Router?.Address} (firmware {Router?.Firmware}).";
     public string Status { get => status; private set => Set(ref status, value); }
+    public string ErrorMessage { get => errorMessage; private set { if (Set(ref errorMessage, value)) Changed(nameof(HasErrorMessage)); } }
+    public bool HasErrorMessage => ErrorMessage.Length > 0;
     public string InstallationHeadline { get => installationHeadline; private set => Set(ref installationHeadline, value); }
     public ObservableCollection<string> Progress { get; } = [];
     public string InstallationLog => log.Report(demo);
@@ -106,7 +106,7 @@ public sealed class WizardViewModel : Observable, IDisposable
         CompatibilityProblem.WrongDevice => "Cannot verify that this device is a GL.iNet Brume 3 (GL-MT5000).",
         CompatibilityProblem.MissingVpn => "No VPN tunnel profile is set up. Cannot continue.",
         CompatibilityProblem.InsufficientLocations => "None of the VPN tunnels contain two distinct geographic locations.",
-        CompatibilityProblem.InactiveVpn => "No eligible VPN tunnel has a usable active WireGuard slot.",
+        CompatibilityProblem.InactiveVpn => "No VPN tunnel passed the active WireGuard check.",
         CompatibilityProblem.UnreadableFirmware => "The router's firmware version could not be verified.",
         CompatibilityProblem.WrongFirmware => "This firmware version has not been verified.",
         CompatibilityProblem.UnknownFiles => "The router's GL.iNet VPN system files could not be verified as supported.",
@@ -117,7 +117,9 @@ public sealed class WizardViewModel : Observable, IDisposable
         CompatibilityProblem.WrongDevice => $"Detected: {Router?.Model ?? "Unknown device"}. Installation supports GL-MT5000 only.",
         CompatibilityProblem.MissingVpn => "Create a VPN tunnel and add VPN connections to it, then disconnect and reconnect here.",
         CompatibilityProblem.InsufficientLocations => "Add connections to at least two different country/city locations within one VPN tunnel, then reconnect here.",
-        CompatibilityProblem.InactiveVpn => "Activate an eligible VPN tunnel in the VPN Dashboard. If it is already active, check that its WireGuard slots are not used by another VPN policy, then reconnect here.",
+        CompatibilityProblem.InactiveVpn => vpnCheckFailures.Count == 0
+            ? "The active VPN state could not be verified. Reconnect and try again."
+            : string.Join(" ", vpnCheckFailures.Distinct(StringComparer.Ordinal)) + " Reconnect after resolving the reported issue.",
         CompatibilityProblem.UnreadableFirmware => "Check the router's firmware information in its Admin Panel, then reconnect. Installation cannot continue without a readable version.",
         CompatibilityProblem.WrongFirmware => $"Detected firmware: {Router?.Firmware ?? "Unknown"}. You can try continuing, but Hotswapper will still reject any unrecognized system-file contents before patching.",
         CompatibilityProblem.UnknownFiles => "One or more required firmware files could not be verified against a known stock or previously patched layout. The version override cannot bypass these checks.",
@@ -140,17 +142,16 @@ public sealed class WizardViewModel : Observable, IDisposable
     private void RefreshPresentation()
     {
         foreach (var p in new[] { nameof(Title), nameof(StepLabel), nameof(PrimaryLabel), nameof(ShowBack),
-            nameof(ShowCancel), nameof(ShowPrimary), nameof(ShowConnect), nameof(ShowConnectionStatus),
-            nameof(ShowSaveLog), nameof(ConnectionButtonLabel), nameof(DisconnectLabel), nameof(ConnectionSummary),
-            nameof(Connected), nameof(IsDisconnected), nameof(CanConnect), nameof(EverConnected),
+            nameof(ShowCancel), nameof(ShowPrimary), nameof(ShowConnect),
+            nameof(ShowSaveLog), nameof(ConnectionButtonLabel), nameof(ConnectionSummary),
+            nameof(Connected), nameof(IsDisconnected), nameof(CanConnect), nameof(CanToggleConnection),
             nameof(ShowVpnHelp), nameof(ShowFirmwareHelp), nameof(ShowFirmwareOverride), nameof(CompatibilityHeadline),
             nameof(CompatibilityDescription), nameof(HasGuards), nameof(GuardHint) }) Changed(p);
-        BackCommand.Refresh(); PrimaryCommand.Refresh(); DisconnectCommand.Refresh(); AddGuardCommand.Refresh();
+        BackCommand.Refresh(); PrimaryCommand.Refresh(); AddGuardCommand.Refresh();
     }
     private void SetConnection(bool value)
     {
         connected = value;
-        if (value) everConnected = true;
         RefreshPresentation();
     }
     private static int DistinctPlaces(VpnProfile p) => new ExactLocationResolver().Group(p.Connections)
@@ -204,7 +205,10 @@ public sealed class WizardViewModel : Observable, IDisposable
                             await attempt.VerifyActiveProfileAsync(profile, ct);
                             EligibleProfiles.Add(profile);
                         }
-                        catch (SafeFailure) { } // Only verified tunnels are selectable.
+                        catch (SafeFailure e)
+                        {
+                            vpnCheckFailures.Add(e.Message);
+                        }
                     }
                     SelectedProfile = EligibleProfiles.FirstOrDefault();
                 }
@@ -233,20 +237,24 @@ public sealed class WizardViewModel : Observable, IDisposable
         RebootStartText = ""; RebootEndText = "";
         profileCount = 0;
         locationProfileCount = 0;
+        vpnCheckFailures.Clear();
         firmwareFilesKnown = false;
         problem = CompatibilityProblem.None;
         AcceptUnsupportedFirmware = false;
         SetConnection(false);
     }
-    private void Disconnect()
+    public void Disconnect()
     {
+        if (Busy || Page != 1) return;
         session?.Dispose(); session = null;
         ClearConnectionData();
+        ErrorMessage = "";
         Status = "Disconnected.";
     }
     private void Back()
     {
         if (Busy) return;
+        ErrorMessage = "";
         Page = Page switch { 4 => 3, 3 => 1, 2 => 1, 1 => 0, _ => 0 };
     }
     private bool CanContinue()
@@ -356,21 +364,25 @@ public sealed class WizardViewModel : Observable, IDisposable
     private async Task RunAsync(Func<CancellationToken, Task> action)
     {
         if (Busy) return;
+        ErrorMessage = "";
         using var cts = new CancellationTokenSource(); operation = cts; Busy = true;
         try { await action(cts.Token); }
         catch (OperationCanceledException)
         {
             Status = "Operation cancelled."; Progress.Add(Status); log.Add(Status);
+            if (Page != 5) ErrorMessage = Status;
         }
         catch (SafeFailure e)
         {
             Status = e.Message; if (Page == 5) Progress.Add("ERROR: " + e.Message); log.Add("ERROR: " + e.Message);
+            if (Page != 5) ErrorMessage = Status;
         }
         catch
         {
             Status = "Operation failed. See router state or try again. Sensitive details were withheld.";
             if (Page == 5) Progress.Add("ERROR: " + Status);
             log.Add("ERROR: " + Status);
+            if (Page != 5) ErrorMessage = Status;
         }
         finally { Busy = false; operation = null; RefreshPresentation(); }
     }

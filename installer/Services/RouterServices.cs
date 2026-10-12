@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using BrumeHotswapper.Installer.Core;
 using Renci.SshNet;
+using Renci.SshNet.Common;
 
 namespace BrumeHotswapper.Installer.Services;
 
@@ -84,15 +85,30 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
         Dispose();
         var connection = new PasswordConnectionInfo(address, "root", password) { Timeout = TimeSpan.FromSeconds(6) };
         ssh = new SshClient(connection);
+        bool hostKeyRejected = false;
         ssh.HostKeyReceived += (_, e) =>
         {
             string fingerprint = "SHA256:" + Convert.ToBase64String(SHA256.HashData(e.HostKey)).TrimEnd('=');
             e.CanTrust = trusted.TryGetValue(address, out var previous) ? previous == fingerprint : trustHost(address, fingerprint);
+            if (!e.CanTrust) hostKeyRejected = true;
             if (e.CanTrust) trusted[address] = fingerprint;
         };
+        try { await ssh.ConnectAsync(ct); }
+        catch (OperationCanceledException) { Dispose(); throw; }
+        catch (SshAuthenticationException)
+        {
+            Dispose();
+            throw new SafeFailure(hostKeyRejected ? "The SSH host key was not trusted. Check the router fingerprint before retrying."
+                : "SSH authentication failed. Check the router admin password.");
+        }
+        catch
+        {
+            Dispose();
+            throw new SafeFailure(hostKeyRejected ? "The SSH host key was not trusted. Check the router fingerprint before retrying."
+                : "Could not establish an SSH connection. Check the router address and SSH access.");
+        }
         try
         {
-            await ssh.ConnectAsync(ct);
             // Verified live GL-MT5000 identity and firmware sources.
             var board = JsonDocument.Parse(await ExecuteAsync("ubus call system board", ct));
             using (board)
@@ -109,7 +125,13 @@ public sealed class SshRouterSession(Func<string, string, bool> trustHost) : IRo
             }
         }
         catch (OperationCanceledException) { Dispose(); throw; }
-        catch { Dispose(); throw new SafeFailure("SSH authentication or device interrogation failed. Check the address, SSH access and administrator password."); }
+        catch (RouterCommandFailure e)
+        {
+            Dispose();
+            throw new SafeFailure($"SSH connected, but a router identity or firmware command failed (exit status {e.ExitStatus?.ToString() ?? "unknown"}); output withheld.");
+        }
+        catch (SafeFailure) { Dispose(); throw; }
+        catch { Dispose(); throw new SafeFailure("SSH connected, but the router identity or firmware response could not be read."); }
     }
     public async Task<string> ExecuteAsync(string command, CancellationToken ct)
     {

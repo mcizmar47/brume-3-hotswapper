@@ -143,38 +143,46 @@ public sealed class RouterInspection(IRouterTransport router, IKillSwitchVerifie
     }
     public async Task<(string CurrentInterface,string CurrentPeer)> VerifyPolicySlotsAsync(VpnProfile profile,CancellationToken ct)
     {
+        async Task<string> Read(string command, string check)
+        {
+            try { return (await router.ExecuteAsync(command, ct)).Trim(); }
+            catch (RouterCommandFailure e)
+            {
+                throw new SafeFailure($"Could not verify {check} (router command exit status {e.ExitStatus?.ToString() ?? "unknown"}); output withheld.");
+            }
+        }
         var policy = Identifier(profile.PolicySection);
-        string group = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.group_id", ct)).Trim();
-        string tunnel = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.tunnel_id", ct)).Trim();
+        string group = await Read($"uci -q get route_policy.{policy}.group_id", "the selected VPN group");
+        string tunnel = await Read($"uci -q get route_policy.{policy}.tunnel_id", "the selected VPN tunnel");
         if (group != profile.GroupId || tunnel != profile.TunnelId) throw new SafeFailure("The selected VPN list changed. Discover it again.");
-        var active = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.via", ct)).Trim();
-        var activePeer = (await router.ExecuteAsync($"uci -q get route_policy.{policy}.peer_id", ct)).Trim();
+        var active = await Read($"uci -q get route_policy.{policy}.via", "the active VPN interface");
+        var activePeer = await Read($"uci -q get route_policy.{policy}.peer_id", "the active VPN peer");
         if (!new[] {"wgclient1", "wgclient2", "wgclient3"}.Contains(active))
             throw new SafeFailure("The selected VPN must be active on a supported WireGuard instance before installation.");
         foreach (var slot in new[] {"wgclient1", "wgclient2", "wgclient3"})
         {
-            var other = (await router.ExecuteAsync($"uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.via='{slot}'$/\\1/p\"", ct)).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var other = (await Read($"uci -q show route_policy | sed -n \"s/^route_policy\\.\\([^.=]*\\)\\.via='{slot}'$/\\1/p\"", "WireGuard policy references")).Split('\n', StringSplitOptions.RemoveEmptyEntries);
             foreach (var reference in other.Where(s => s != profile.PolicySection))
             {
                 // Firmware handle_always_vpn_policy maintains this process rule for the active VPN.
                 bool generated = reference == "gl_process_vpn" && slot == active &&
-                    (await router.ExecuteAsync("uci -q get route_policy.gl_process_vpn", ct)).Trim() == "rule_process" &&
-                    (await router.ExecuteAsync("uci -q get route_policy.gl_process_vpn.group_id || true", ct)).Trim().Length == 0;
+                    await Read("uci -q get route_policy.gl_process_vpn", "the generated process policy") == "rule_process" &&
+                    (await Read("uci -q get route_policy.gl_process_vpn.group_id || true", "the generated process policy group")).Length == 0;
                 if (!generated) throw new SafeFailure($"WireGuard instance {slot} is referenced by another VPN policy.");
             }
-            var config = (await router.ExecuteAsync($"uci -q get network.{slot}.config || true", ct)).Trim();
+            var config = await Read($"uci -q get network.{slot}.config || true", "WireGuard slot ownership");
             if (config.Length == 0)
             {
-                if ((await router.ExecuteAsync($"if ip link show {slot} >/dev/null 2>&1; then echo present; fi", ct)).Trim() == "present")
+                if (await Read($"if ip link show {slot} >/dev/null 2>&1; then echo present; fi", "WireGuard slot runtime ownership") == "present")
                     throw new SafeFailure($"WireGuard instance {slot} has unrecognized runtime ownership. Disconnect the unrelated VPN.");
                 continue;
             }
             if (!Regex.IsMatch(config, "^peer_[0-9]+$")) throw new SafeFailure($"WireGuard instance {slot} belongs to an unsupported VPN configuration.");
-            var owner = (await router.ExecuteAsync($"uci -q get wireguard.{config}.group_id", ct)).Trim();
+            var owner = await Read($"uci -q get wireguard.{config}.group_id", "WireGuard slot group ownership");
             if (owner != group) throw new SafeFailure($"WireGuard instance {slot} is occupied by another VPN list. Disconnect it before installing.");
 
         }
-        if ((await router.ExecuteAsync($"uci -q get network.{active}.config", ct)).Trim() != "peer_" + activePeer)
+        if (await Read($"uci -q get network.{active}.config", "the active WireGuard peer") != "peer_" + activePeer)
             throw new SafeFailure("The active VPN policy and WireGuard instance disagree. Reconnect the selected VPN first.");
         return (active,activePeer);
     }

@@ -153,6 +153,15 @@ public class RouterInspectionTests
         var error = await Assert.ThrowsAsync<SafeFailure>(() => installer.PlanAsync(Config(), default));
         Assert.Contains("another VPN policy", error.Message);
     }
+    [Fact] public async Task FailedPolicyReadReportsWhichCheckFailed()
+    {
+        var router = new Intercept(new RouterFixture()) { Read = cmd =>
+            cmd == "uci -q get route_policy.vpn.peer_id" ? throw new RouterCommandFailure(1) : null };
+        var error = await Assert.ThrowsAsync<SafeFailure>(() =>
+            new RouterInspection(router, new KillSwitchVerifier()).VerifyPolicySlotsAsync(Config().Profile, default));
+        Assert.Contains("active VPN peer", error.Message);
+        Assert.Contains("exit status 1", error.Message);
+    }
     [Fact] public async Task AnonymousPolicyAndFirmwareProcessReferenceAreSupported()
     {
         var fake = new RouterFixture();
